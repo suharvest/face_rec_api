@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# Data
+data/*.json
+data/*.db
+!data/.gitkeep
+
+# Photos (optional - uncomment if you don't want to track photos)
+# photos/*
+# !photos/.gitkeep
+
+# Debug images
+debug_images/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Model files (large, should be downloaded separately)
+# models/*.hef

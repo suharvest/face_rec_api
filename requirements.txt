@@ -1,0 +1,15 @@
+# Core Application
+fastapi==0.104.1
+uvicorn[standard]==0.24.0.post1
+pydantic==2.5.0
+numpy==1.26.2
+opencv-python==4.8.1.78
+scikit-image==0.22.0
+
+# Development & Testing
+pytest==7.4.3
+httpx==0.25.2
+pytest-dependency>=0.5.1
+
+# NOTE: HailoRT is installed separately on the device
+# and is not listed here.

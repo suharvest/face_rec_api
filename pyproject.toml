@@ -1,0 +1,23 @@
+[project]
+name = "standalone-face-api"
+version = "1.0.0"
+description = "Standalone face recognition service with JSON-based vector storage"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.104.1",
+    "uvicorn[standard]==0.24.0.post1",
+    "pydantic==2.5.0",
+    "numpy==1.26.2",
+    "opencv-python==4.8.1.78",
+    "scikit-image==0.22.0",
+    "pytest==7.4.3",
+    "httpx==0.25.2",
+    "pytest-dependency==2.0.0"
+]
+
+# Hailo Runtime Dependencies - REQUIRED
+# =====================================
+# IMPORTANT: HailoRT MUST be installed for this service to work
+#
+# See main face_embed_api documentation for installation instructions.
