@@ -37,8 +37,9 @@ ARCFACE_DEST_LANDMARKS = np.array([
 class FaceDetector:
     """Face detection using SCRFD model on Hailo-8"""
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, vdevice=None):
         self.model_path = model_path
+        self.target = vdevice  # Use shared VDevice
         self.infer_model = None
         self.input_queue = queue.Queue(maxsize=20)
         self.output_queue = queue.Queue(maxsize=20)
@@ -53,9 +54,11 @@ class FaceDetector:
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(f"Detection model not found: {self.model_path}")
 
-        params = VDevice.create_params()
-        params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
-        self.target = VDevice(params)
+        # Only create VDevice if not provided (for backward compatibility)
+        if self.target is None:
+            params = VDevice.create_params()
+            params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
+            self.target = VDevice(params)
 
         self.infer_model = self.target.create_infer_model(self.model_path)
 
@@ -372,8 +375,9 @@ class FaceAligner:
 class FaceEmbedder:
     """Extract face embeddings using ArcFace model on Hailo-8"""
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, vdevice=None):
         self.model_path = model_path
+        self.target = vdevice  # Use shared VDevice
         self.infer_model = None
         self.input_queue = queue.Queue(maxsize=20)
         self.output_queue = queue.Queue(maxsize=20)
@@ -388,9 +392,11 @@ class FaceEmbedder:
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(f"Recognition model not found: {self.model_path}")
 
-        params = VDevice.create_params()
-        params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
-        self.target = VDevice(params)
+        # Only create VDevice if not provided (for backward compatibility)
+        if self.target is None:
+            params = VDevice.create_params()
+            params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
+            self.target = VDevice(params)
 
         self.infer_model = self.target.create_infer_model(self.model_path)
 
@@ -530,9 +536,18 @@ class FacePipeline:
         self.recognition_model_path = recognition_model_path or config.FACE_RECOGNITION_MODEL
 
         logger.info("Initializing Face Pipeline...")
-        self.detector = FaceDetector(self.detection_model_path)
+
+        # Create shared VDevice for both models
+        logger.info("Creating shared Hailo VDevice...")
+        params = VDevice.create_params()
+        params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
+        self.vdevice = VDevice(params)
+        logger.info("✓ Shared VDevice created")
+
+        # Initialize detector and embedder with shared VDevice
+        self.detector = FaceDetector(self.detection_model_path, vdevice=self.vdevice)
         self.aligner = FaceAligner()
-        self.embedder = FaceEmbedder(self.recognition_model_path)
+        self.embedder = FaceEmbedder(self.recognition_model_path, vdevice=self.vdevice)
         logger.info("Face Pipeline initialized successfully")
 
     def process_image(self, image: np.ndarray, strategy: str = "largest") -> Dict:
