@@ -31,10 +31,11 @@ photos/
 
 ```bash
 # Activate virtual environment
+cd services/standalone_face_api
 source .venv/bin/activate
 
 # Run batch processing
-python scripts/batch_process.py
+uv run scripts/batch_process.py
 ```
 
 This creates `data/embeddings.json` with face embeddings for all photos.

@@ -13,8 +13,12 @@ dependencies = [
     "scikit-image==0.22.0",
     "pytest==7.4.3",
     "httpx==0.25.2",
-    "pytest-dependency==2.0.0"
+    "pytest-dependency",
+    "hailort",
 ]
+
+[tool.uv.sources]
+hailort = { path = "hailort-4.21.0-cp311-cp311-linux_aarch64.whl" }
 
 # Hailo Runtime Dependencies - REQUIRED
 # =====================================

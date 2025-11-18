@@ -21,8 +21,8 @@ FACE_RECOGNITION_MODEL = os.getenv(
 )
 
 # Recognition settings
-SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.5"))
-CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.55"))
+SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.4"))
+CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.45"))
 NMS_THRESHOLD = float(os.getenv("NMS_THRESHOLD", "0.45"))
 MIN_FACE_SIZE = int(os.getenv("MIN_FACE_SIZE", "8"))
 
