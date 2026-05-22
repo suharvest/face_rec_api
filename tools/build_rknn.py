@@ -68,11 +68,11 @@ def _build_one(
             std_values=std,
             target_platform=target_platform,
             quant_img_RGB2BGR=False,
+            dynamic_input=[[[1, 3, input_size[0], input_size[1]]]],
         )
 
         ret = rknn.load_onnx(
             model=onnx_path,
-            input_size_list=[[1, 3, input_size[0], input_size[1]]],
         )
         if ret != 0:
             raise RuntimeError(f"load_onnx failed: ret={ret}")

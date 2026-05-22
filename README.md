@@ -569,22 +569,31 @@ the host BSP.
 
 ### Step 3 — Run
 
+**RK3576 (dual-core NPU):**
+
 ```bash
 docker run -d --name frc-rknn \
-    --device /dev/dri/renderD129 \
+    --privileged \
     -v /usr/lib/librknnrt.so:/usr/lib/librknnrt.so:ro \
+    -v /proc/device-tree/compatible:/proc/device-tree/compatible:ro \
     -v $(pwd)/models/rknn:/models:ro \
-    -v $(pwd)/photos:/photos:ro \
+    -v $(pwd)/photos:/photos \
     -v $(pwd)/data:/data \
     -p 8001:8001 \
     face_rec_api:rknn
-
-curl http://localhost:8001/health
 ```
 
-Optional: pin to specific NPU cores via `-e RKNN_CORE_MASK=0_1_2` (or
-`AUTO`, `0`, `0_1`, `ALL`). Default is `AUTO`, which works on both
-RK3576 and RK3588 — the runtime masks unavailable cores silently.
+`--privileged` is required: the RKNN Lite runtime performs container-integrity
+checks that need access to `/sys/kernel/debug/rknpu` and the NPU devfreq
+node — neither is reachable through a regular `--device` mapping.
+
+`/proc/device-tree/compatible` must be bind-mounted so the runtime can detect
+the Rockchip SoC model (RK3576 / RK3588 / etc.) at start-up.
+
+**RK3588 (triple-core NPU):**
+
+Same command; optionally add `-e RKNN_CORE_MASK=0_1_2` to use all three cores
+(default `AUTO` already picks the right core layout per SoC).
 
 ### Running Without Docker
 

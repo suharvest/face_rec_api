@@ -18,13 +18,20 @@
 #
 # Run example (see README "RKNN Deployment"):
 #   docker run -d --name frc-rknn \
-#     --device /dev/dri/renderD129 \
+#     --privileged \
 #     -v /usr/lib/librknnrt.so:/usr/lib/librknnrt.so:ro \
+#     -v /proc/device-tree/compatible:/proc/device-tree/compatible:ro \
 #     -v $(pwd)/models/rknn:/models:ro \
 #     -v $(pwd)/data:/data \
-#     -v $(pwd)/photos:/photos:ro \
+#     -v $(pwd)/photos:/photos \
 #     -p 8001:8001 \
 #     face_rec_api:rknn
+#
+# Note: --privileged is required because the RKNN Lite runtime performs
+# container-integrity checks that need access to /sys/kernel/debug/rknpu
+# and the NPU devfreq node — neither reachable through --device alone.
+# /proc/device-tree/compatible must be mounted so the runtime can detect
+# the SoC model (RK3576 / RK3588) at start-up.
 
 FROM python:3.11-slim-bookworm
 
