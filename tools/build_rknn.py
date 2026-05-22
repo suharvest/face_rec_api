@@ -163,10 +163,17 @@ def main() -> int:
         quantize=quantize,
     )
 
-    # ArcFace MobileFaceNet: input 1x3x112x112, normalization (pixel-127.5)/127.5 -> mean=127.5 std=127.5.
+    # ArcFace recognition: input 1x3x112x112, normalization (pixel-127.5)/127.5 -> mean=127.5 std=127.5.
+    # Prefer MobileFaceNet (w600k_mbf), fall back to ResNet-50 (w600k_r50) if not found.
+    embedder_onnx = os.path.join(args.onnx_dir, "w600k_mbf.onnx")
+    if not os.path.exists(embedder_onnx):
+        fallback = os.path.join(args.onnx_dir, "w600k_r50.onnx")
+        if os.path.exists(fallback):
+            print(f"[note] w600k_mbf.onnx not found, using {fallback}", file=sys.stderr)
+            embedder_onnx = fallback
     _build_one(
         RKNN,
-        onnx_path=os.path.join(args.onnx_dir, "w600k_mbf.onnx"),
+        onnx_path=embedder_onnx,
         rknn_path=os.path.join(args.out_dir, "arcface_mobilefacenet.rknn"),
         mean=[[127.5, 127.5, 127.5]],
         std=[[127.5, 127.5, 127.5]],
