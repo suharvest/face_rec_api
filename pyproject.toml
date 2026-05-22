@@ -23,7 +23,10 @@ dependencies = [
 #   uv sync --extra rknn     # Rockchip RK3576/RK3588 (P2, not yet implemented)
 [project.optional-dependencies]
 hailo = ["hailort"]
-jetson = []
+# Jetson: the `tensorrt` python module ships with JetPack in
+# /usr/lib/python3.10/dist-packages — do NOT pip install it. Only cuda-python
+# is needed from PyPI for memcpy/stream management.
+jetson = ["cuda-python>=12.0,<13.0"]
 rknn = []
 
 [tool.uv.sources]

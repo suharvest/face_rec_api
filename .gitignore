@@ -38,3 +38,10 @@ logs/
 
 # Model files (large, should be downloaded separately)
 # models/*.hef
+models/**/*.engine
+models/**/*.onnx
+models/onnx/
+
+# InsightFace bundle
+buffalo_l.zip
+buffalo_l/

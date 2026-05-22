@@ -21,9 +21,8 @@ def create_backend(name: str) -> FaceBackend:
         from .hailo import HailoBackend
         return HailoBackend()
     if name == "jetson":
-        raise NotImplementedError(
-            "Jetson (TensorRT) backend is planned for P1 and not yet available."
-        )
+        from .tensorrt import TensorRTBackend
+        return TensorRTBackend()
     if name == "rknn":
         raise NotImplementedError(
             "Rockchip (RKNN) backend is planned for P2 and not yet available."
