@@ -501,6 +501,101 @@ FACE_BACKEND=jetson ./start_standalone.sh
 Make sure the system `tensorrt` module is on `PYTHONPATH` (it is by
 default on JetPack-provisioned devices).
 
+## RKNN Deployment (Rockchip RK3576 / RK3588)
+
+The service also runs on Rockchip NPU devices (RK3576 dev boards, RK3588
+boards such as Radxa Rock 5 / Orange Pi 5) using a `.rknn`-engine backend.
+Select via `FACE_BACKEND=rknn`.
+
+### System Requirements
+
+- Debian 12 (bookworm) aarch64 host (Python 3.11 inside the container)
+- Rockchip NPU userland with **`librknnrt.so` >= 2.3.0** present at
+  `/usr/lib/librknnrt.so` (ships with the official Rockchip BSP).
+- NPU character device: `/dev/dri/renderD129` (RK3576) or
+  `/dev/dri/renderD128` depending on board. Check with `ls /dev/dri/`.
+- Docker (no special runtime required — the NPU is passed via `--device`).
+
+> **Engines are SoC-specific.** A `.rknn` built for RK3576 (2-core NPU)
+> will not run on RK3588 (3-core NPU) and vice versa. Always set
+> `--target` to the SoC you intend to deploy on.
+
+### Step 1 — Convert ONNX → RKNN on an x86 Linux dev host
+
+`rknn-toolkit2` (the conversion tool) **requires** Linux x86_64 with
+glibc >= 2.27 (Ubuntu 18.04+ / Debian 10+) and Python 3.8-3.11. It
+does **not** run on macOS, on aarch64 Jetson/Pi, or on the RK3576
+itself. Do this step on a dev workstation.
+
+```bash
+# On your x86 Linux dev host:
+pip install rknn-toolkit2
+./tools/download_insightface.sh ./models/onnx
+./tools/build_rknn_calib.sh ./photos ./calib.txt   # builds calib list from your faces
+python tools/build_rknn.py \
+    --onnx-dir ./models/onnx/buffalo_l \
+    --out-dir  ./models/rknn \
+    --calib-list ./calib.txt \
+    --target rk3576
+# Produces:
+#   models/rknn/scrfd_10g.rknn               (~9 MB, INT8)
+#   models/rknn/arcface_mobilefacenet.rknn   (~3 MB, INT8)
+```
+
+For best INT8 quality use **50-100 representative face images** as the
+calibration set. With fewer the script warns; with significantly fewer
+detection recall and embedding cosine similarity will degrade.
+
+Copy the generated `.rknn` files to the device:
+
+```bash
+scp models/rknn/*.rknn user@<rk3576-host>:/path/to/face_rec_api/models/rknn/
+```
+
+### Step 2 — Build the Runtime Image (on the RK3576 device)
+
+```bash
+docker build -t face_rec_api:rknn -f Dockerfile.rknn .
+```
+
+The image is based on `python:3.11-slim-bookworm` (~150 MB) and only
+ships `rknn-toolkit-lite2` (the ~10 MB runtime binding). The full
+`rknn-toolkit2` (which pulls torch + tensorflow, ~2 GB) is **never**
+installed in the runtime image — it is a dev-machine-only tool.
+
+`librknnrt.so` itself is **bind-mounted from the host** at run time, so
+the image stays under ~250 MB and is automatically kept in sync with
+the host BSP.
+
+### Step 3 — Run
+
+```bash
+docker run -d --name frc-rknn \
+    --device /dev/dri/renderD129 \
+    -v /usr/lib/librknnrt.so:/usr/lib/librknnrt.so:ro \
+    -v $(pwd)/models/rknn:/models:ro \
+    -v $(pwd)/photos:/photos:ro \
+    -v $(pwd)/data:/data \
+    -p 8001:8001 \
+    face_rec_api:rknn
+
+curl http://localhost:8001/health
+```
+
+Optional: pin to specific NPU cores via `-e RKNN_CORE_MASK=0_1_2` (or
+`AUTO`, `0`, `0_1`, `ALL`). Default is `AUTO`, which works on both
+RK3576 and RK3588 — the runtime masks unavailable cores silently.
+
+### Running Without Docker
+
+```bash
+uv sync --extra rknn
+FACE_BACKEND=rknn ./start_standalone.sh
+```
+
+Make sure `/usr/lib/librknnrt.so` is present on the host and the
+current user has read/write access to `/dev/dri/renderD12*`.
+
 ## License
 
 MIT License

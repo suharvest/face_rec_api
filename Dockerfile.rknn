@@ -1,0 +1,83 @@
+# Rockchip RK3576 / RK3588 runtime image for the Standalone Face Recognition Service.
+#
+# Targets: Debian 12 (bookworm) aarch64 hosts with Rockchip NPU userland
+# already installed (librknnrt.so >= 2.3.0).
+#
+# Image philosophy: slim runtime. ~250 MB instead of ~3 GB.
+# - Base: python:3.11-slim-bookworm (Debian 12 to match RK3576 host).
+# - Only `rknn-toolkit-lite2` (~10 MB) is installed inside the image —
+#   this is the *runtime* binding. The full `rknn-toolkit2` (conversion,
+#   pulls torch + tensorflow ~2 GB) lives only on the x86 dev host where
+#   `tools/build_rknn.py` runs.
+# - `librknnrt.so` is bind-mounted from the host at runtime
+#   (`-v /usr/lib/librknnrt.so:/usr/lib/librknnrt.so:ro`). The library is
+#   ABI-tied to the kernel NPU driver, so duplicating it in the image is
+#   a foot-gun (driver upgrade → image breaks).
+# - opencv-python-headless (no GUI deps).
+# - No pytorch, no onnxruntime, no tensorflow.
+#
+# Run example (see README "RKNN Deployment"):
+#   docker run -d --name frc-rknn \
+#     --device /dev/dri/renderD129 \
+#     -v /usr/lib/librknnrt.so:/usr/lib/librknnrt.so:ro \
+#     -v $(pwd)/models/rknn:/models:ro \
+#     -v $(pwd)/data:/data \
+#     -v $(pwd)/photos:/photos:ro \
+#     -p 8001:8001 \
+#     face_rec_api:rknn
+
+FROM python:3.11-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Minimal system deps: libgl + libglib for opencv-python-headless.
+# DEB_MIRROR build-arg lets you swap to a regional mirror if deb.debian.org
+# is unreachable from the build host (common in China). Default keeps the
+# upstream Debian mirror.
+ARG DEB_MIRROR=http://deb.debian.org
+RUN sed -i "s|http://deb.debian.org|${DEB_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null \
+    || sed -i "s|http://deb.debian.org|${DEB_MIRROR}|g" /etc/apt/sources.list 2>/dev/null \
+    || true \
+ && apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+WORKDIR /app
+
+# Runtime dependencies only. opencv-python-headless avoids GUI X11 deps.
+# rknn-toolkit-lite2 ships the user-space Python binding to librknnrt.so;
+# the .so itself is bind-mounted from the host. PIP_INDEX build-arg lets
+# you swap the index when pypi.org is rate-limited or unreachable.
+ARG PIP_INDEX=https://pypi.org/simple
+RUN pip3 config set global.index-url "${PIP_INDEX}" \
+ && pip3 install --no-cache-dir --upgrade pip \
+ && pip3 install --no-cache-dir \
+        "fastapi==0.104.1" \
+        "uvicorn[standard]==0.24.0.post1" \
+        "pydantic==2.5.0" \
+        "numpy==1.26.2" \
+        "opencv-python-headless==4.8.1.78" \
+        "scikit-image==0.22.0" \
+        "Pillow" \
+        "python-multipart" \
+        "rknn-toolkit-lite2>=2.3.0"
+
+COPY src ./src
+
+ENV FACE_BACKEND=rknn \
+    MODELS_PATH=/models \
+    PHOTOS_FOLDER=/photos \
+    EMBEDDINGS_JSON=/data/embeddings.json \
+    PYTHONPATH=/app/src \
+    HOST=0.0.0.0 \
+    PORT=8001
+
+EXPOSE 8001
+
+CMD ["python3", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8001", "--app-dir", "/app/src"]
