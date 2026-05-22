@@ -449,10 +449,19 @@ Without this the first few inferences will be slower while the
 governor ramps clocks up, and steady-state latency can drift up to
 ~2x.
 
-**Performance** (Orin Nano 8GB, FP16, MobileFaceNet embedder, `jetson_clocks` off):
-~40 ms p50 / ~41 ms mean over 10 consecutive `/infer` calls. With
-`sudo jetson_clocks` expect another 5–10 ms improvement. Orin NX / AGX
+**Performance** (Orin Nano 8GB, MobileFaceNet embedder, `jetson_clocks` off):
+
+| Precision | Detector | p50 | Engine |
+|---|---|---|---|
+| FP16 | scrfd_10g.engine (8.7 MB) | ~40 ms | Default |
+| INT8† | scrfd_10g.int8.engine (5.3 MB) | **~35 ms** | Requires calibration |
+
+With `sudo jetson_clocks` expect another 5–10 ms improvement. Orin NX / AGX
 Orin are faster due to higher GPU clocks and more memory bandwidth.
+
+† INT8 calibration uses `polygraphy convert --int8 --data-loader-script`
+with 100 representative 640×640 face images. See `tools/build_int8_calib.md`
+for the workflow.
 
 ### Step 4 — Run
 
