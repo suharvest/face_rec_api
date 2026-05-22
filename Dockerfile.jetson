@@ -1,0 +1,85 @@
+# NVIDIA Jetson runtime image for the Standalone Face Recognition Service.
+#
+# Targets: JetPack 6.2 / L4T R36.4.x devices (Orin Nano / Orin NX / AGX Orin).
+# Engines are JetPack + SM-version specific — build them on the target device
+# with `tools/build_engine.sh` and mount via `-v $(pwd)/models/jetson:/models`.
+#
+# Image philosophy: stay slim (~1 GB instead of 16 GB).
+# - Base: l4t-base:r36.2.0 (the runtime-friendly Ubuntu 22.04 root with the
+#   nvidia-container-toolkit hooks but WITHOUT CUDA toolkit / TensorRT).
+#   NVIDIA stopped publishing l4t-base for r36.4.x on NGC — r36.2.0 is the
+#   last available tag and works fine here because we bind-mount the TRT /
+#   CUDA libs from the host JetPack 6.2 install at run time, so the base
+#   only contributes glibc + Python + apt packages.
+# - TensorRT Python bindings (`/usr/lib/python3.10/dist-packages/tensorrt*`)
+#   and the TensorRT/CUDA shared libs from `/usr/lib/aarch64-linux-gnu` +
+#   `/usr/local/cuda/lib64` are mounted read-only at runtime. The host
+#   already ships them as part of JetPack 6.2 — duplicating them inside the
+#   image bloats it by ~14 GB for no functional benefit. See README "Jetson
+#   Deployment" section for the exact `docker run` invocation.
+# - opencv-python-headless (no GUI deps).
+# - No pytorch, no onnxruntime, no torch2trt — engines are pre-built off-image.
+
+FROM nvcr.io/nvidia/l4t-base:r36.2.0
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Minimal system deps. l4t-base ships python3.10 but no pip.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+WORKDIR /app
+
+# Install Python runtime deps into the system interpreter so the TensorRT
+# bindings bind-mounted at /usr/lib/python3.10/dist-packages remain importable.
+# cuda-python provides the `cuda.cudart` shim used by src/backends/tensorrt.py;
+# its dlopen target (libcudart.so.12) is satisfied by the host bind-mount.
+RUN pip3 install --no-cache-dir --upgrade pip \
+ && pip3 install --no-cache-dir \
+        "fastapi==0.104.1" \
+        "uvicorn[standard]==0.24.0.post1" \
+        "pydantic==2.5.0" \
+        "numpy==1.26.2" \
+        "opencv-python-headless==4.8.1.78" \
+        "scikit-image==0.22.0" \
+        "Pillow" \
+        "python-multipart" \
+        "cuda-python>=12.0,<13.0"
+
+# Copy application source.
+COPY src ./src
+COPY start_standalone.sh ./
+
+# Runtime configuration. Engines, photos and embeddings JSON are expected to
+# be provided via bind mounts. NVIDIA_* enable nvidia-container-runtime to
+# inject the device files + libcuda driver via CSV; TensorRT / CUDA runtime
+# libs themselves are mounted explicitly in the `docker run` command (see
+# README — they are not in /etc/nvidia-container-runtime/host-files-for-container.d).
+ENV FACE_BACKEND=jetson \
+    MODELS_PATH=/models \
+    PHOTOS_FOLDER=/photos \
+    EMBEDDINGS_JSON=/data/embeddings.json \
+    PYTHONPATH=/app/src \
+    HOST=0.0.0.0 \
+    PORT=8001 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu
+
+EXPOSE 8001
+
+# Run uvicorn directly so we can stay on the system Python and pick up
+# the host-mounted tensorrt module from dist-packages.
+CMD ["python3", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8001", "--app-dir", "/app/src"]

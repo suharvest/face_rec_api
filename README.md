@@ -389,6 +389,118 @@ ls -la models/
 2. Place model files in `models/` directory
 3. Install Python dependencies: `uv sync`
 
+## Jetson Deployment (TensorRT)
+
+The service also runs on NVIDIA Jetson devices (Orin Nano / Orin NX / AGX
+Orin) using a TensorRT backend. Select via `FACE_BACKEND=jetson`.
+
+### System Requirements
+
+- JetPack 6.2 / L4T R36.4.x (TensorRT 10.3, CUDA 12.5)
+- Python 3.10 (system) — the JetPack-bundled `tensorrt` module lives in
+  `/usr/lib/python3.10/dist-packages` and must not be replaced by pip.
+- Docker with `nvidia` runtime configured.
+
+### Step 1 — Build Engines on the Target Device
+
+**Engines are JetPack release + GPU compute-capability specific.** An
+engine built for Orin Nano (sm_87) is not portable to AGX Orin (sm_87
+but different JetPack) or to a different host. Always rebuild when you
+change devices.
+
+```bash
+# On the target Jetson, in this repo:
+./tools/download_insightface.sh ./models/onnx
+./tools/build_engine.sh ./models/onnx/buffalo_l ./models/jetson
+# Produces:
+#   models/jetson/scrfd_10g.engine
+#   models/jetson/arcface_mobilefacenet.engine
+```
+
+### Step 2 — Build the Runtime Image
+
+```bash
+docker build -t face_rec_api:jetson -f Dockerfile.jetson .
+```
+
+The image is based on `nvcr.io/nvidia/l4t-base:r36.2.0` (~1 GB) and
+deliberately ships **without** CUDA toolkit or TensorRT inside. The
+JetPack 6.2 host already provides them in `/usr/lib/...`, and they are
+bind-mounted into the container at run time (see Step 3). This keeps
+the image around **1 GB instead of ~16 GB** of the previous
+`l4t-jetpack`-based build, and avoids shipping two copies of the same
+~5 GB TRT/CUDA stack on every Jetson.
+
+> **JetPack 6.2.1 is required on the host** — TensorRT 10.3.0 +
+> CUDA 12.6 + cuDNN 9.3 + libcuda from the host are what the container
+> dlopen()s. Older JetPack hosts will fail at engine deserialisation.
+
+### Step 3 — Lock Jetson clocks (one-time, per boot)
+
+For deterministic latency, lock CPU/GPU/EMC to their maximum frequency
+**before** starting the container:
+
+```bash
+sudo nvpmodel -m 0      # MAXN power profile (Orin Nano)
+sudo jetson_clocks      # lock everything to max
+```
+
+Without this the first few inferences will be slower while the
+governor ramps clocks up, and steady-state latency can drift up to
+~2x.
+
+### Step 4 — Run
+
+The container mounts the host's TensorRT Python bindings + the
+TRT/CUDA/cuDNN shared libs read-only. NVIDIA's `nvidia-container-runtime`
+CSV files on JetPack 6.2 only auto-mount the driver (`libcuda.so`), so
+the TRT/CUDA runtime libs are passed explicitly here.
+
+```bash
+docker run --runtime nvidia -d \
+    --name frc-jetson \
+    -v $(pwd)/models/jetson:/models:ro \
+    -v $(pwd)/photos:/photos \
+    -v $(pwd)/data:/data \
+    -p 8001:8001 \
+    \
+    -v /usr/lib/python3.10/dist-packages/tensorrt:/usr/lib/python3.10/dist-packages/tensorrt:ro \
+    -v /usr/lib/python3.10/dist-packages/tensorrt-10.3.0.dist-info:/usr/lib/python3.10/dist-packages/tensorrt-10.3.0.dist-info:ro \
+    -v /usr/lib/python3.10/dist-packages/tensorrt_dispatch:/usr/lib/python3.10/dist-packages/tensorrt_dispatch:ro \
+    -v /usr/lib/python3.10/dist-packages/tensorrt_lean:/usr/lib/python3.10/dist-packages/tensorrt_lean:ro \
+    -v /usr/lib/aarch64-linux-gnu/libnvinfer.so.10:/usr/lib/aarch64-linux-gnu/libnvinfer.so.10:ro \
+    -v /usr/lib/aarch64-linux-gnu/libnvinfer_plugin.so.10:/usr/lib/aarch64-linux-gnu/libnvinfer_plugin.so.10:ro \
+    -v /usr/lib/aarch64-linux-gnu/libnvonnxparser.so.10:/usr/lib/aarch64-linux-gnu/libnvonnxparser.so.10:ro \
+    -v /usr/lib/aarch64-linux-gnu/libcudnn.so.9:/usr/lib/aarch64-linux-gnu/libcudnn.so.9:ro \
+    -v /usr/local/cuda:/usr/local/cuda:ro \
+    \
+    face_rec_api:jetson
+
+curl http://localhost:8001/health
+```
+
+The service expects engine files mounted at `/models` (or override via
+`MODELS_PATH`). If they are missing, startup fails with an explicit
+"engine not found" error — there is no silent fallback.
+
+### Image-size before/after
+
+| Build                  | Image size | Notes                              |
+|------------------------|------------|------------------------------------|
+| `l4t-jetpack` (P1)     | 16.1 GB    | Ships full CUDA toolkit + TRT      |
+| `l4t-base` + mounts    | ~1 GB      | TRT/CUDA from host bind-mounts     |
+
+### Running Without Docker
+
+```bash
+pip3 install --break-system-packages cuda-python opencv-python-headless \
+    fastapi 'uvicorn[standard]' pydantic scikit-image
+FACE_BACKEND=jetson ./start_standalone.sh
+```
+
+Make sure the system `tensorrt` module is on `PYTHONPATH` (it is by
+default on JetPack-provisioned devices).
+
 ## License
 
 MIT License
