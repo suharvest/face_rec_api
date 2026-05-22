@@ -449,6 +449,11 @@ Without this the first few inferences will be slower while the
 governor ramps clocks up, and steady-state latency can drift up to
 ~2x.
 
+**Performance** (Orin Nano 8GB, FP16, MobileFaceNet embedder, `jetson_clocks` off):
+~40 ms p50 / ~41 ms mean over 10 consecutive `/infer` calls. With
+`sudo jetson_clocks` expect another 5–10 ms improvement. Orin NX / AGX
+Orin are faster due to higher GPU clocks and more memory bandwidth.
+
 ### Step 4 — Run
 
 The container mounts the host's TensorRT Python bindings + the
