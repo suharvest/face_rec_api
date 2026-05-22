@@ -1,17 +1,43 @@
 # Standalone Face Recognition Service
 
-A lightweight, standalone face recognition service with JSON-based vector storage. No external dependencies like Node-RED or Qdrant required.
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10+-blue)](https://www.python.org/)
+![Backends](https://img.shields.io/badge/backends-Hailo%20|%20Jetson%20|%20RKNN-green)
+
+**One face recognition API. Three edge AI platforms.**
+
+Deploy the same REST API on a Raspberry Pi 5 (Hailo-8), NVIDIA Jetson Orin
+(TensorRT), or Rockchip RK3576/3588 (RKNN) — pick the hardware that fits
+your project, not the other way around.  Stateless design, zero external
+dependencies, and per-backend Docker images under 2 GB.
+
+## Table of Contents
+
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [API Reference](#api-reference)
+- [Performance](#performance)
+- [Configuration](#configuration)
+- [Architecture](#architecture)
+- [Deployment](#deployment)
+  - [Jetson (TensorRT)](#jetson-deployment-tensorrt)
+  - [RKNN (Rockchip)](#rknn-deployment-rockchip)
+  - [Hailo (Raspberry Pi)](#hailo-deployment-raspberry-pi)
+- [Development](#development)
+- [Troubleshooting](#troubleshooting)
 
 ## Features
 
-- 🚀 **Fast Recognition**: < 50ms recognition latency
-- 📁 **Simple Storage**: JSON-based embedding storage
-- 🔄 **Hot Reload**: Update face database while service is running
-- 🎯 **High Accuracy**: Hailo-8 accelerated ArcFace embeddings
-- 🔌 **Standalone**: No external services required
-- 📡 **RESTful API**: Easy integration
+- ⚡ **Multi-backend**: Hailo-8 · TensorRT · RKNN — same API, one config switch
+- 🚀 **Fast Recognition**: 30–53 ms p50, depending on hardware
+- 📁 **Simple Storage**: JSON-based embedding store, no database required
+- 🔄 **Hot Reload**: Update the face database while the service is running
+- 🔌 **Self-contained**: Zero external services — just Python + numpy + OpenCV
+- 📡 **RESTful API**: `/infer`, `/recognize`, `/enroll`, `/health`, and more
 
 ## Quick Start
+
+<!-- TODO: Add a ~15s terminal GIF showing curl /infer + JSON response -->
 
 ### 1. Prepare Photos
 
@@ -79,145 +105,39 @@ Response:
 
 ## API Endpoints
 
-### GET `/health`
+Full interactive docs at `http://localhost:8001/docs` (Swagger UI).
 
-Health check endpoint.
+| Method | Endpoint | Description | Key response field |
+|--------|----------|-------------|-------------------|
+| `GET` | `/health` | Backend probe + service status | `status`, `backend`, `model_tag` |
+| `POST` | `/infer` | Stateless inference — detect + embed | `faces[].embedding` (base64), `face_count` |
+| `POST` | `/recognize` | Identify a face against stored users | `matched`, `name`, `confidence` |
+| `POST` | `/enroll` | Register a new person | `embedding_saved` |
+| `POST` | `/reload` | Hot-reload `photos/` → embeddings | `loaded`, `reload_time_ms` |
+| `DELETE` | `/remove/{name}` | Delete a user | `embeddings_saved` |
+| `GET` | `/list` | List enrolled users | `users`, `count` |
+| `POST` | `/detect_and_embed` | Debug: raw faces + embeddings | `faces[].bbox`, `faces[].embedding` |
 
-**Response:**
-```json
-{
-  "status": "ok",
-  "loaded_users": 42,
-  "embeddings_file": "data/embeddings.json",
-  "last_reload": "2025-06-14T10:30:00",
-  "uptime_ms": 12345
-}
-```
+**Quick examples:**
 
-### POST `/recognize`
+```bash
+# Health check
+curl http://localhost:8001/health
 
-**Primary endpoint** - Recognize face in image.
+# Stateless inference (returns embedding + bbox + landmarks)
+curl -X POST http://localhost:8001/infer \
+  -H 'Content-Type: application/json' \
+  -d '{"image_b64":"'$(base64 -w0 photo.jpg)'"}'
 
-**Request:**
-```json
-{
-  "image_base64": "base64_encoded_image"
-}
-```
+# Recognize a face
+curl -X POST http://localhost:8001/recognize \
+  -H 'Content-Type: application/json' \
+  -d '{"image_base64":"'$(base64 -w0 photo.jpg)'"}'
 
-**Response:**
-```json
-{
-  "matched": true,
-  "name": "john_doe",
-  "confidence": 0.85,
-  "processing_time_ms": 45
-}
-```
-
-### POST `/enroll`
-
-Manually enroll a single person.
-
-**Request:**
-```json
-{
-  "name": "new_person",
-  "image_base64": "base64_encoded_image"
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "name": "new_person",
-  "embedding_saved": true,
-  "error": null
-}
-```
-
-### POST `/reload`
-
-**Key feature** - Reload embeddings from photos folder.
-
-Use this after adding new photos to the `photos/` folder.
-
-**Request:**
-```json
-{
-  "force": false
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "loaded": 42,
-  "failed": [],
-  "embeddings_saved": true,
-  "reload_time_ms": 2500
-}
-```
-
-**Process:**
-1. Scans `photos/` folder
-2. Processes all images → embeddings
-3. Saves to `data/embeddings.json`
-4. Reloads into memory
-
-### DELETE `/remove/{name}`
-
-Remove a user from the database.
-
-**Response:**
-```json
-{
-  "success": true,
-  "removed": "john_doe",
-  "embeddings_saved": true
-}
-```
-
-### GET `/list`
-
-List all enrolled users.
-
-**Response:**
-```json
-{
-  "users": ["alice_wang", "bob_lee", "jane_smith", "john_doe"],
-  "count": 4
-}
-```
-
-### POST `/detect_and_embed`
-
-Debug endpoint - detect faces and return embeddings.
-
-**Request:**
-```json
-{
-  "image_base64": "base64_encoded_image"
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "faces": [
-    {
-      "bbox": {"x": 100, "y": 50, "w": 200, "h": 250},
-      "landmarks": [[150, 120], [220, 118], ...],
-      "confidence": 0.98,
-      "embedding": [0.123, -0.456, ...]
-    }
-  ],
-  "error": null,
-  "processing_time_ms": 45
-}
+# Register a new user
+curl -X POST http://localhost:8001/enroll \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"alice","image_base64":"'$(base64 -w0 alice.jpg)'"}'
 ```
 
 ## Configuration
@@ -332,10 +252,16 @@ python scripts/batch_process.py
 
 ## Performance
 
-- **Startup**: < 5s with 100 users (loading JSON)
-- **Recognition**: < 50ms (detect + embed + search)
-- **Reload**: ~300ms per photo (includes processing)
-- **Memory**: ~200KB per user (512-D float32 vector)
+All measurements on real hardware with MobileFaceNet embedder and 640×640 input.
+Steady-state p50 over 10 consecutive `/infer` calls.
+
+| Backend | Device | Precision | Latency (p50) | Det+Emb Engine |
+|---------|--------|-----------|---------------|----------------|
+| Hailo-8 | Raspberry Pi 5 | INT8 | **30 ms** | 3.4 MB `.hef` |
+| TensorRT | Jetson Orin Nano 8GB | INT8 | **35 ms** | 5.3 + 7.2 MB `.engine` |
+| RKNN | RK3576 LubanCat-3 | INT8 | **53 ms** | 4.1 + 5.2 MB `.rknn` |
+
+**Startup**: < 5 s (100 users from JSON).  **Memory**: ~200 KB per user (512-D fp32).
 
 ## Troubleshooting
 
@@ -623,10 +549,17 @@ FACE_BACKEND=rknn ./start_standalone.sh
 Make sure `/usr/lib/librknnrt.so` is present on the host and the
 current user has read/write access to `/dev/dri/renderD12*`.
 
+## Acknowledgements
+
+Built on [InsightFace](https://github.com/deepinsight/insightface) (SCRFD detection + ArcFace recognition),
+with per-backend acceleration via [HailoRT](https://hailo.ai/),
+[TensorRT](https://developer.nvidia.com/tensorrt), and
+[RKNN-Toolkit-Lite2](https://github.com/airockchip/rknn-toolkit2).
+
 ## License
 
-MIT License
+MIT — see [LICENSE](LICENSE).
 
 ## Support
 
-For issues or questions, please create an issue in the main repository.
+For issues or questions, please open an issue in the repository.
