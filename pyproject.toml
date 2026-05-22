@@ -27,7 +27,11 @@ hailo = ["hailort"]
 # /usr/lib/python3.10/dist-packages — do NOT pip install it. Only cuda-python
 # is needed from PyPI for memcpy/stream management.
 jetson = ["cuda-python>=12.0,<13.0"]
-rknn = []
+# RKNN runtime: rknn-toolkit-lite2 is the *lite* runtime (~10 MB, just the C
+# binding to librknnrt.so). Do NOT install the full `rknn-toolkit2` here —
+# it pulls torch + tensorflow (~2 GB) and is a dev-machine-only conversion
+# tool. Conversion happens via tools/build_rknn.py on an x86 Linux host.
+rknn = ["rknn-toolkit-lite2>=2.3.0"]
 
 [tool.uv.sources]
 hailort = { path = "hailort-4.21.0-cp311-cp311-linux_aarch64.whl" }

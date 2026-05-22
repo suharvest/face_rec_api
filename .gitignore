@@ -40,7 +40,9 @@ logs/
 # models/*.hef
 models/**/*.engine
 models/**/*.onnx
+models/**/*.rknn
 models/onnx/
+calib.txt
 
 # InsightFace bundle
 buffalo_l.zip

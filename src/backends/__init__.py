@@ -24,7 +24,6 @@ def create_backend(name: str) -> FaceBackend:
         from .tensorrt import TensorRTBackend
         return TensorRTBackend()
     if name == "rknn":
-        raise NotImplementedError(
-            "Rockchip (RKNN) backend is planned for P2 and not yet available."
-        )
+        from .rknn import RKNNBackend
+        return RKNNBackend()
     raise ValueError(f"Unknown backend: {name!r}")
