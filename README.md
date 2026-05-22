@@ -590,6 +590,10 @@ node — neither is reachable through a regular `--device` mapping.
 `/proc/device-tree/compatible` must be bind-mounted so the runtime can detect
 the Rockchip SoC model (RK3576 / RK3588 / etc.) at start-up.
 
+**Performance** (RK3576 2-core NPU, INT8-quantized MobileFaceNet, 640x640 input):
+~53 ms p50 / ~56 ms mean over 10 consecutive `/infer` calls. RK3588 (3-core NPU)
+is expected to be ~30-40 % faster.
+
 **RK3588 (triple-core NPU):**
 
 Same command; optionally add `-e RKNN_CORE_MASK=0_1_2` to use all three cores
