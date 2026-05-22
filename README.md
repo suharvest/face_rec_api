@@ -1,3 +1,5 @@
+<p align="center"><img src="media/logo.png" width="200" alt="logo"></p>
+
 # Standalone Face Recognition Service
 
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
