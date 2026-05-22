@@ -8,10 +8,28 @@ echo "=========================================="
 # Change to script directory
 cd "$(dirname "$0")"
 
+# Backend selection (default: hailo). Override via env: FACE_BACKEND=jetson ./start_standalone.sh
+FACE_BACKEND="${FACE_BACKEND:-hailo}"
+export FACE_BACKEND
+
+# Per-backend model extension mapping
+case "$FACE_BACKEND" in
+    hailo)  MODEL_EXT="hef"   ;;
+    jetson) MODEL_EXT="engine";;
+    rknn)   MODEL_EXT="rknn"  ;;
+    *)
+        echo "Error: unknown FACE_BACKEND=$FACE_BACKEND"
+        echo "Supported: hailo | jetson | rknn"
+        exit 1
+        ;;
+esac
+
+MODELS_DIR="${MODELS_PATH:-models/$FACE_BACKEND}"
+
 # Check if virtual environment exists
 if [ ! -d ".venv" ]; then
     echo "Error: Virtual environment not found!"
-    echo "Please run: uv venv && uv pip install -r requirements.txt"
+    echo "Please run: uv sync --extra $FACE_BACKEND"
     exit 1
 fi
 
@@ -22,7 +40,7 @@ source .venv/bin/activate
 # Check if embeddings.json exists
 if [ ! -f "data/embeddings.json" ]; then
     echo ""
-    echo "⚠️  No embeddings.json found!"
+    echo "[WARN] No embeddings.json found!"
     echo ""
     echo "Please run batch processing first:"
     echo "  python scripts/batch_process.py"
@@ -36,31 +54,33 @@ if [ ! -f "data/embeddings.json" ]; then
     fi
 fi
 
-# Check if models exist
-if [ ! -f "models/scrfd_10g.hef" ] || [ ! -f "models/arcface_mobilefacenet.hef" ]; then
-    echo "Error: Hailo model files not found in models/"
-    echo "Please ensure the following files exist:"
-    echo "  - models/scrfd_10g.hef"
-    echo "  - models/arcface_mobilefacenet.hef"
+# Check model files for the selected backend
+DET_MODEL="${FACE_DETECTION_MODEL:-$MODELS_DIR/scrfd_10g.$MODEL_EXT}"
+EMB_MODEL="${FACE_RECOGNITION_MODEL:-$MODELS_DIR/arcface_mobilefacenet.$MODEL_EXT}"
+
+if [ ! -f "$DET_MODEL" ] || [ ! -f "$EMB_MODEL" ]; then
+    echo "Error: model files not found for backend '$FACE_BACKEND':"
+    echo "  detector: $DET_MODEL"
+    echo "  embedder: $EMB_MODEL"
     exit 1
 fi
 
 # Show configuration
 echo ""
 echo "Configuration:"
-echo "  Photos folder: ${PHOTOS_FOLDER:-./photos}"
-echo "  Embeddings file: ${EMBEDDINGS_JSON:-./data/embeddings.json}"
-echo "  Similarity threshold: ${SIMILARITY_THRESHOLD:-0.5}"
+echo "  Backend:             $FACE_BACKEND"
+echo "  Models dir:          $MODELS_DIR"
+echo "  Detector model:      $DET_MODEL"
+echo "  Embedder model:      $EMB_MODEL"
+echo "  Photos folder:       ${PHOTOS_FOLDER:-./photos}"
+echo "  Embeddings file:     ${EMBEDDINGS_JSON:-./data/embeddings.json}"
+echo "  Similarity threshold: ${SIMILARITY_THRESHOLD:-0.4}"
 echo "  Host: ${HOST:-0.0.0.0}"
 echo "  Port: ${PORT:-8001}"
 echo ""
 
-# Start the service
 echo "Starting service..."
 echo "=========================================="
 echo ""
 
 PYTHONPATH=src python src/app.py
-
-# Or use uvicorn directly:
-# PYTHONPATH=src uvicorn src.app:app --host ${HOST:-0.0.0.0} --port ${PORT:-8001}

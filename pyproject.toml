@@ -1,7 +1,7 @@
 [project]
 name = "standalone-face-api"
-version = "1.0.0"
-description = "Standalone face recognition service with JSON-based vector storage"
+version = "1.1.0"
+description = "Standalone face recognition service with pluggable backends (Hailo / Jetson / RKNN)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -14,14 +14,23 @@ dependencies = [
     "pytest==7.4.3",
     "httpx==0.25.2",
     "pytest-dependency",
-    "hailort",
 ]
+
+# Hardware backends are optional — install only the one matching your device.
+# Examples:
+#   uv sync --extra hailo    # Raspberry Pi 5 + Hailo-8
+#   uv sync --extra jetson   # NVIDIA Jetson (P1, not yet implemented)
+#   uv sync --extra rknn     # Rockchip RK3576/RK3588 (P2, not yet implemented)
+[project.optional-dependencies]
+hailo = ["hailort"]
+jetson = []
+rknn = []
 
 [tool.uv.sources]
 hailort = { path = "hailort-4.21.0-cp311-cp311-linux_aarch64.whl" }
 
-# Hailo Runtime Dependencies - REQUIRED
-# =====================================
-# IMPORTANT: HailoRT MUST be installed for this service to work
-#
-# See main face_embed_api documentation for installation instructions.
+# Hailo Runtime Dependencies
+# ==========================
+# For Hailo backend: HailoRT must be installed. Use `uv sync --extra hailo`,
+# which pulls the bundled `hailort-4.21.0-cp311-cp311-linux_aarch64.whl`.
+# This wheel only works on aarch64 Linux (e.g. Raspberry Pi 5).
