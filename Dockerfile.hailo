@@ -106,7 +106,6 @@ RUN pip3 config set global.index-url "${PIP_INDEX}" \
         "pydantic==2.5.0" \
         "numpy==1.26.2" \
         "opencv-python-headless==4.8.1.78" \
-        "scikit-image==0.22.0" \
         "Pillow" \
         "python-multipart" \
         /tmp/hailort-4.21.0-cp311-cp311-linux_aarch64.whl \
