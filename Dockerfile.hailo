@@ -12,14 +12,22 @@
 #   image against the image's Python 3.11. This decouples us from the host
 #   Python (Pi OS trixie ships 3.13 — a host-mounted _pyhailort would be a
 #   cp313 .so and fail to import in a 3.11 container).
-# - libhailort.so.4.21.0 is bind-mounted from the host at run time
-#   (`-v /usr/lib/libhailort.so.4.21.0:/usr/lib/libhailort.so.4.21.0:ro`),
-#   same philosophy as Dockerfile.rknn's librknnrt.so mount. The wheel's
-#   _pyhailort links against the exact soname `libhailort.so.4.21.0`, so a
-#   version drift on the host fails loudly at import time instead of
-#   corrupting inference. The 4.21.0 arm64 .deb is not redistributable via
-#   apt (RPi archive only carries 4.20/4.23), hence the mount instead of a
-#   dpkg -i layer.
+# - libhailort.so.4.21.0 is baked INTO the image (self-contained — no host
+#   userland library needed, the host only needs the hailort-pcie kernel
+#   driver 4.21.0, apt-mark held). Source: the frigate-maintained HailoRT
+#   redistribution, built for debian12 arm64 (exactly our base):
+#     https://github.com/frigate-nvr/hailort/releases/download/v4.21.0/hailort-debian12-arm64.tar.gz
+#   Fetched at build time via `ADD --checksum` with the sha256 pinned below,
+#   so the build is reproducible and tamper-evident. The wheel's _pyhailort
+#   links against the exact soname `libhailort.so.4.21.0`, so a library
+#   version drift fails loudly at import time instead of corrupting
+#   inference. (The 4.21.0 arm64 .deb is not distributable via apt — the RPi
+#   archive only carries 4.20/4.23 — hence the tarball.)
+#   The same release also publishes a cp311 wheel
+#   (hailort-4.21.0-cp311-cp311-linux_aarch64.whl); we keep the repo-bundled
+#   wheel (md5 2fde57f853ea66d670a60e68b4ca15da) which is the one validated
+#   on-device. frigate's wheel (md5 626f6d6469f9bdadfc838483caf77ead) is a
+#   different build and is noted here only as an alternative source.
 #
 # Image philosophy: slim runtime, ~1 GB unpacked.
 # - Base: python:3.11-slim-bookworm.
@@ -37,7 +45,6 @@
 #     --restart unless-stopped \
 #     --device /dev/hailo0 \
 #     -p 8001:8001 \
-#     -v /usr/lib/libhailort.so.4.21.0:/usr/lib/libhailort.so.4.21.0:ro \
 #     -v $HOME/face_rec_api/src:/app/src:ro \
 #     -v $HOME/face_rec_api/models/hailo:/models:ro \
 #     -v $HOME/face_rec_api/data:/data \
@@ -54,7 +61,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Minimal system deps: libgl + libglib for opencv-python-headless,
+# Minimal system deps: libglib for opencv-python-headless (libgthread only —
+# the headless wheel does NOT link libGL, so no libgl1/mesa: saves ~200 MB),
 # libstdc++/libgcc for _pyhailort. DEB_MIRROR build-arg lets you swap to a
 # regional mirror when deb.debian.org is unreachable from the build host.
 ARG DEB_MIRROR=http://deb.debian.org
@@ -62,7 +70,6 @@ RUN sed -i "s|http://deb.debian.org|${DEB_MIRROR}|g" /etc/apt/sources.list.d/deb
     || sed -i "s|http://deb.debian.org|${DEB_MIRROR}|g" /etc/apt/sources.list 2>/dev/null \
     || true \
  && apt-get update && apt-get install -y --no-install-recommends \
-        libgl1 \
         libglib2.0-0 \
         libstdc++6 \
         libgcc-s1 \
@@ -70,6 +77,20 @@ RUN sed -i "s|http://deb.debian.org|${DEB_MIRROR}|g" /etc/apt/sources.list.d/deb
     && apt-get clean
 
 WORKDIR /app
+
+# HailoRT userland library, baked in (self-contained image).
+# Source: frigate-maintained HailoRT 4.21.0 redistribution for debian12/arm64.
+# sha256 pinned — a changed upstream artifact fails the build instead of
+# silently producing a different image.
+ADD --checksum=sha256:dd840548eb5d0d147c99aee2cb013d39d64be09c5bc63061171fcfacf4547b3f \
+    https://github.com/frigate-nvr/hailort/releases/download/v4.21.0/hailort-debian12-arm64.tar.gz \
+    /tmp/hailort-debian12-arm64.tar.gz
+RUN tar -xzf /tmp/hailort-debian12-arm64.tar.gz -C /tmp \
+        rootfs/usr/local/lib/libhailort.so.4.21.0 \
+ && install -m 0644 /tmp/rootfs/usr/local/lib/libhailort.so.4.21.0 /usr/lib/libhailort.so.4.21.0 \
+ && ln -sf libhailort.so.4.21.0 /usr/lib/libhailort.so \
+ && ldconfig \
+ && rm -rf /tmp/hailort-debian12-arm64.tar.gz /tmp/rootfs
 
 # Runtime Python deps + the HailoRT cp311 binding wheel.
 # gcc/libc6-dev are needed only to build `netifaces` (hailort dep, sdist-only

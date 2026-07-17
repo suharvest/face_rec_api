@@ -19,18 +19,56 @@ The kernel driver (`hailo_pci`), userland `libhailort.so` and the Python
 binding `_pyhailort` must all match **major.minor** — the 4.x ioctl protocol
 is not forward compatible. Current pinned version: **4.21.0**.
 
-- Host: `hailort` + `hailort-pcie-driver` 4.21.0, both **apt-mark hold**
-  (verify: `apt-mark showhold | grep hailo` must show both).
+- Host: `hailort-pcie-driver` 4.21.0, **apt-mark hold**
+  (verify: `apt-mark showhold | grep hailo`).
 - Image: the repo-bundled `hailort-4.21.0-cp311-cp311-linux_aarch64.whl`
   installed against the image's Python 3.11 (host Python is 3.13 — never
   mount the host `hailo_platform` package into the container).
-- `libhailort.so.4.21.0` is bind-mounted from the host (the 4.21.0 arm64
-  .deb is not in any reachable apt repo; RPi archive carries 4.20/4.23
-  only). `_pyhailort` links against the exact soname `libhailort.so.4.21.0`,
-  so any host drift fails loudly at startup.
+- `libhailort.so.4.21.0` is **baked into the image** (self-contained). It is
+  fetched at build time, sha256-pinned in `Dockerfile.hailo`, from the
+  frigate-maintained HailoRT redistribution (built for debian12/arm64,
+  exactly our base):
+  <https://github.com/frigate-nvr/hailort/releases/download/v4.21.0/hailort-debian12-arm64.tar.gz>
+  (The 4.21.0 arm64 .deb is not in any reachable apt repo; the RPi archive
+  carries 4.20/4.23 only.) `_pyhailort` links against the exact soname
+  `libhailort.so.4.21.0`, so any library drift fails loudly at startup.
+- Host requirements are therefore just the **kernel driver**:
+  `hailort-pcie-driver` 4.21.0, apt-mark held. The host userland `hailort`
+  package is no longer needed by the container (no libhailort bind-mount).
 
-Upgrading HailoRT means: new host deb pair + re-hold, new cp311 wheel in the
-repo, rebuild image — all three in one step.
+Upgrading HailoRT means: new host `hailort-pcie-driver` deb + re-hold, new
+cp311 wheel in the repo, new frigate tarball URL + sha256 in
+`Dockerfile.hailo`, rebuild image — all in one step.
+
+### Fresh device provisioning (new Pi, no Hailo driver yet)
+
+The container is fully self-contained on the userland side, so a fresh host
+needs exactly two things: the **kernel driver + firmware**, then Docker.
+
+```bash
+# 1. Kernel driver 4.21.0 (DKMS, source-built) + hailo8 firmware + udev rule.
+sudo ./tools/install_hailo_driver.sh            # add --dry-run to preview
+
+# 2. Load the image (built on the Mac, see Build below) and run (see Run).
+docker load < /tmp/frc-hailo-selfcontained.tar.gz
+```
+
+The script is **detection-first** (checks `modinfo hailo_pci`, the
+`hailort-pcie-driver` apt package, and `dkms status`) and never blindly
+reinstalls:
+
+- driver already at **4.21.x** → prints "already in place", exits 0, makes
+  no changes (safe to run on harvest-pi);
+- driver present but a **different version** (e.g. 4.20/4.23) → loud
+  ABI-mismatch warning, exits 1, leaves the driver untouched — only
+  `--force-reinstall` replaces it;
+- **no driver** → full install (kernel-headers check → DKMS build of tag
+  v4.21.0 → firmware → udev rule → modprobe, then verifies `/dev/hailo0`).
+
+`--dry-run` reports the detection result and the would-be actions without
+executing. If the driver came from the RPi apt archive instead of DKMS, pin
+it: `sudo apt-mark hold hailort-pcie-driver`. No host `hailort` userland
+package is required.
 
 ### Build (on the Mac, Apple Silicon)
 
@@ -55,7 +93,6 @@ docker run -d --name frc-hailo \
   --restart unless-stopped \
   --device /dev/hailo0 \
   -p 8001:8001 \
-  -v /usr/lib/libhailort.so.4.21.0:/usr/lib/libhailort.so.4.21.0:ro \
   -v /home/harvest/face_rec_api/src:/app/src:ro \
   -v /home/harvest/face_rec_api/models/hailo:/models:ro \
   -v /home/harvest/face_rec_api/data:/data \
