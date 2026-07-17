@@ -63,6 +63,10 @@ class HealthResponse(BaseModel):
     embeddings_file: str = Field(..., description="Path to embeddings JSON file")
     last_reload: Optional[str] = Field(None, description="Last reload timestamp")
     uptime_ms: int = Field(..., description="Service uptime in milliseconds")
+    liveness: str = Field(
+        "disabled",
+        description="Anti-spoofing model status: loaded | disabled | missing",
+    )
 
 
 class RecognizeRequest(BaseModel):
@@ -74,6 +78,11 @@ class RecognizeResponse(BaseModel):
     name: Optional[str] = None
     confidence: float
     processing_time_ms: int
+    # Liveness fields — null when liveness is disabled (backward compatible).
+    live: Optional[bool] = None
+    liveness_score: Optional[float] = None
+    # Failure reason, e.g. "spoof" when a presentation attack is rejected.
+    reason: Optional[str] = None
 
 
 class EnrollRequest(BaseModel):
@@ -130,9 +139,15 @@ class InferRequest(BaseModel):
 class FaceResult(BaseModel):
     bbox: List[float] = Field(..., description="[x, y, w, h]")
     landmarks: List[List[float]] = Field(..., description="5 x [x, y]")
-    embedding: str = Field(..., description="base64(float32[512])")
+    embedding: Optional[str] = Field(
+        None,
+        description="base64(float32[512]); null for spoof faces in reject mode",
+    )
     det_score: float
     aligned_b64: Optional[str] = None
+    # Liveness fields — null when liveness is disabled (backward compatible).
+    live: Optional[bool] = None
+    liveness_score: Optional[float] = None
 
 
 class InferResponse(BaseModel):
@@ -263,11 +278,17 @@ async def health():
         logger.warning("health_check threw: %s", exc)
         ok = False
 
+    liveness_status = face_pipeline.liveness_status if face_pipeline else "disabled"
+    capabilities = ["detect", "embed"]
+    if liveness_status == "loaded":
+        capabilities.append("liveness")
+
     return HealthResponse(
         status="healthy" if ok else "degraded",
         backend=backend_name,
         model_tag=model_tag,
-        capabilities=["detect", "embed"],
+        capabilities=capabilities,
+        liveness=liveness_status,
         users_loaded=len(vector_store.vectors) if vector_store else 0,
         embeddings_file=config.EMBEDDINGS_JSON,
         last_reload=vector_store.metadata.get('last_updated') if vector_store else None,
@@ -298,8 +319,12 @@ async def infer(request: InferRequest):
     faces_out: List[FaceResult] = []
     for r in results:
         bb = r["bbox"]
-        emb: np.ndarray = r["embedding"]
-        emb_b64 = base64.b64encode(emb.astype(np.float32).tobytes()).decode("ascii")
+        emb: Optional[np.ndarray] = r["embedding"]
+        emb_b64: Optional[str] = None
+        if emb is not None:
+            emb_b64 = base64.b64encode(
+                emb.astype(np.float32).tobytes()
+            ).decode("ascii")
         aligned_b64: Optional[str] = None
         if request.return_aligned and r.get("aligned") is not None:
             aligned_b64 = _encode_image_jpeg_b64(r["aligned"])
@@ -310,6 +335,8 @@ async def infer(request: InferRequest):
                 embedding=emb_b64,
                 det_score=float(r["confidence"]),
                 aligned_b64=aligned_b64,
+                live=r.get("live"),
+                liveness_score=r.get("liveness_score"),
             )
         )
 
@@ -336,6 +363,9 @@ async def recognize(request: RecognizeRequest):
             return RecognizeResponse(
                 matched=False, name=None, confidence=0.0,
                 processing_time_ms=int((time.time() - start_time) * 1000),
+                live=result.get('live'),
+                liveness_score=result.get('liveness_score'),
+                reason=result.get('reason'),
             )
         embedding = result['embedding']
         search_result = vector_store.search(embedding, threshold=config.SIMILARITY_THRESHOLD)
@@ -344,6 +374,8 @@ async def recognize(request: RecognizeRequest):
             name=search_result['name'],
             confidence=search_result['confidence'],
             processing_time_ms=int((time.time() - start_time) * 1000),
+            live=result.get('live'),
+            liveness_score=result.get('liveness_score'),
         )
     except Exception as e:
         logger.error("Recognition error: %s", e, exc_info=True)
@@ -439,6 +471,8 @@ async def detect_and_embed(request: DetectAndEmbedRequest):
             'landmarks': result['face']['landmarks'],
             'confidence': result['face']['confidence'],
             'embedding': result['embedding'],
+            'live': result.get('live'),
+            'liveness_score': result.get('liveness_score'),
         }
         return DetectAndEmbedResponse(
             success=True, faces=[face_data], error=None,

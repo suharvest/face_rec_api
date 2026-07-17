@@ -43,6 +43,31 @@ _DEFAULT_MODEL_TAGS = {
 }
 MODEL_TAG = os.getenv("MODEL_TAG", _DEFAULT_MODEL_TAGS.get(FACE_BACKEND, "unknown"))
 
+# --- Liveness (passive anti-spoofing, MiniFASNet) ---
+# Model file convention: models/<backend>/liveness_minifasnet.<ext>
+FACE_LIVENESS_MODEL = os.getenv(
+    "FACE_LIVENESS_MODEL",
+    str(Path(MODELS_PATH) / f"liveness_minifasnet.{_EXT}"),
+)
+# Master switch. Default on; the pipeline auto-degrades to disabled (with a
+# warning, without crashing) if the model file is missing or the backend has
+# no liveness support.
+LIVENESS_ENABLED = os.getenv("LIVENESS_ENABLED", "true").lower() in ("true", "1", "t")
+# Real-face probability threshold: score >= threshold -> live.
+LIVENESS_THRESHOLD = float(os.getenv("LIVENESS_THRESHOLD", "0.5"))
+# What to do with spoof faces: "reject" (skip embed/recognition) or
+# "flag" (recognize as usual but report live=false).
+LIVENESS_FAIL_ACTION = os.getenv("LIVENESS_FAIL_ACTION", "reject").lower()
+if LIVENESS_FAIL_ACTION not in ("reject", "flag"):
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "Invalid LIVENESS_FAIL_ACTION=%r, falling back to 'reject'",
+        LIVENESS_FAIL_ACTION,
+    )
+    LIVENESS_FAIL_ACTION = "reject"
+# MiniFASNet bbox expansion factor (2.7 for the 2.7_80x80 variant).
+LIVENESS_CROP_SCALE = float(os.getenv("LIVENESS_CROP_SCALE", "2.7"))
+
 # Recognition settings
 SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.4"))
 CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.45"))
