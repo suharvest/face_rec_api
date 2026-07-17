@@ -16,7 +16,6 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-from skimage.transform import SimilarityTransform
 
 import config
 import liveness as liveness_util
@@ -82,13 +81,72 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, thresh: float) -> List[int]:
     return keep
 
 
+def umeyama_similarity(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
+    """Least-squares similarity transform (Umeyama 1991), pure numpy.
+
+    Estimates the ``(dim+1, dim+1)`` homogeneous matrix ``T`` (uniform scale +
+    rotation + translation) minimizing ``sum ||dst_i - s*R*src_i - t||^2``,
+    exactly matching ``skimage.transform.SimilarityTransform.estimate`` /
+    skimage's internal ``_umeyama(estimate_scale=True)`` — which this replaces
+    to drop the scikit-image (and transitively scipy) runtime dependency.
+
+    Degenerate input (rank-0 covariance, e.g. all points coincident) yields a
+    matrix of NaNs, same as skimage. Collinear points (rank dim-1) use the
+    reflection-corrected ``d`` vector branch from the paper (eq. 40-43).
+
+    NOTE: like skimage, all intermediate math runs in the *input dtype* —
+    float32 landmarks stay float32. Do NOT "improve" this by upcasting to
+    float64: the ~1e-6 matrix difference shifts a couple of warped pixels by
+    1 LSB, which int8-quantized NPU embedders (Hailo) amplify to a ~0.0025
+    cosine drift vs previously enrolled embeddings.
+    """
+    src = np.asarray(src)
+    dst = np.asarray(dst)
+    num, dim = src.shape
+
+    src_mean = src.mean(axis=0)
+    dst_mean = dst.mean(axis=0)
+    src_demean = src - src_mean
+    dst_demean = dst - dst_mean
+
+    # Covariance (eq. 38).
+    A = dst_demean.T @ src_demean / num
+
+    # Reflection correction vector d (eq. 39).
+    d = np.ones((dim,), dtype=np.float64)
+    if np.linalg.det(A) < 0:
+        d[dim - 1] = -1
+
+    T = np.eye(dim + 1, dtype=np.float64)
+
+    U, S, V = np.linalg.svd(A)  # V is V^T
+
+    rank = np.linalg.matrix_rank(A)
+    if rank == 0:
+        return np.full_like(T, np.nan)
+    if rank == dim - 1:
+        if np.linalg.det(U) * np.linalg.det(V) > 0:
+            T[:dim, :dim] = U @ V
+        else:
+            s = d[dim - 1]
+            d[dim - 1] = -1
+            T[:dim, :dim] = U @ np.diag(d) @ V
+            d[dim - 1] = s
+    else:
+        T[:dim, :dim] = U @ np.diag(d) @ V
+
+    # Uniform scale (eq. 41 & 42) and translation (eq. 40).
+    scale = 1.0 / src_demean.var(axis=0).sum() * (S @ d)
+    T[:dim, dim] = dst_mean - scale * (T[:dim, :dim] @ src_mean)
+    T[:dim, :dim] *= scale
+    return T
+
+
 def _align(image: np.ndarray, landmarks: List[Tuple[float, float]],
            output_size: int = 112) -> np.ndarray:
     """5-point similarity-transform alignment to 112x112 ArcFace canonical pose."""
     src = np.array(landmarks, dtype=np.float32)
-    tform = SimilarityTransform()
-    tform.estimate(src, ARCFACE_DEST_LANDMARKS)
-    M = tform.params[0:2, :]
+    M = umeyama_similarity(src, ARCFACE_DEST_LANDMARKS)[0:2, :]
     return cv2.warpAffine(image, M, (output_size, output_size), borderValue=0.0)
 
 
