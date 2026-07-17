@@ -21,6 +21,8 @@ import numpy as np
 
 from .base import FaceBackend, FaceBackendError
 
+import liveness as liveness_util
+
 logger = logging.getLogger(__name__)
 
 # Hailo imports are deferred to backend instantiation, not module import,
@@ -184,12 +186,19 @@ class HailoBackend(FaceBackend):
         self.vdevice = None
         self._detector: Optional[_HailoModelRunner] = None
         self._embedder: Optional[_HailoModelRunner] = None
+        self._liveness: Optional[_HailoModelRunner] = None
         self._det_lock = threading.Lock()
         self._emb_lock = threading.Lock()
+        self._live_lock = threading.Lock()
         self._closed = False
 
     # ---- lifecycle ------------------------------------------------------ #
-    def load(self, detector_path: str, embedder_path: str) -> None:
+    def load(
+        self,
+        detector_path: str,
+        embedder_path: str,
+        liveness_path: Optional[str] = None,
+    ) -> None:
         logger.info("Creating shared Hailo VDevice (ROUND_ROBIN scheduler)...")
         params = VDevice.create_params()
         params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
@@ -199,14 +208,23 @@ class HailoBackend(FaceBackend):
         self._detector.start()
         self._embedder = _HailoModelRunner("embedder", embedder_path, self.vdevice)
         self._embedder.start()
-        logger.info("HailoBackend ready (model_tag=%s)", self.MODEL_TAG)
+        if liveness_path:
+            self._liveness = _HailoModelRunner(
+                "liveness", liveness_path, self.vdevice
+            )
+            self._liveness.start()
+        logger.info(
+            "HailoBackend ready (model_tag=%s, liveness=%s)",
+            self.MODEL_TAG,
+            "loaded" if self._liveness is not None else "off",
+        )
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
         logger.info("Shutting down HailoBackend...")
-        for runner in (self._detector, self._embedder):
+        for runner in (self._detector, self._embedder, self._liveness):
             if runner is not None:
                 try:
                     runner.stop()
@@ -230,6 +248,10 @@ class HailoBackend(FaceBackend):
     @property
     def model_tag(self) -> str:
         return self.MODEL_TAG
+
+    @property
+    def liveness_loaded(self) -> bool:
+        return self._liveness is not None
 
     @property
     def detector_input_hw(self) -> Tuple[int, int]:
@@ -350,3 +372,49 @@ class HailoBackend(FaceBackend):
                     [emb, np.zeros(512 - emb.size, dtype=np.float32)]
                 )
         return emb.astype(np.float32, copy=False)
+
+    def liveness_raw(self, face_crop_bgr: np.ndarray) -> float:
+        """MiniFASNet passive anti-spoofing on an 80x80 BGR uint8 crop.
+
+        Preprocessing contract (see ``liveness.py`` docstring): the crop is
+        already bbox-expanded (scale=2.7) + resized by the shared pipeline
+        util. Per Minivision's official predict transform there is NO
+        mean/std normalization and NO /255 scaling — the model consumes
+        0-255 values in **BGR** channel order, so we feed the uint8 HWC crop
+        directly (the HEF was quantized with the same convention).
+        """
+        if self._liveness is None:
+            raise FaceBackendError("Liveness model not loaded")
+        if face_crop_bgr.dtype != np.uint8:
+            face_crop_bgr = np.clip(face_crop_bgr, 0, 255).astype(np.uint8)
+
+        # Match the HEF's declared input size (canonically 80x80x3 HWC).
+        assert self._liveness.infer_model is not None
+        in_shape = self._liveness.infer_model.input().shape
+        model_h, model_w = int(in_shape[0]), int(in_shape[1])
+        h, w = face_crop_bgr.shape[:2]
+        if (h, w) != (model_h, model_w):
+            face_crop_bgr = cv2.resize(face_crop_bgr, (model_w, model_h))
+        face_crop_bgr = np.ascontiguousarray(face_crop_bgr)
+
+        with self._live_lock:
+            raw = self._liveness.infer_sync(face_crop_bgr, face_crop_bgr)
+            quant = self._liveness.quant_infos
+
+        # Single output: 2-class [fake, real] or 3-class [2D, real, 3D]
+        # class logits. Dequantize, softmax, take index 1 (= real in both
+        # layouts).
+        name = next(iter(raw))
+        buf = raw[name]
+        if name in quant:
+            qp_scale, qp_zp = quant[name]
+            logits = (buf.astype(np.float32) - qp_zp) * qp_scale
+        else:
+            logits = buf.astype(np.float32)
+        logits = logits.flatten()
+        if logits.size < 2:
+            raise FaceBackendError(
+                f"Unexpected liveness output size: {logits.size}"
+            )
+        probs = liveness_util.softmax(logits)
+        return float(probs[liveness_util.LIVENESS_REAL_INDEX])

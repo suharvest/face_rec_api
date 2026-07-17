@@ -172,7 +172,17 @@ class RKNNBackend(FaceBackend):
         self._closed = False
 
     # -- lifecycle ------------------------------------------------------- #
-    def load(self, detector_path: str, embedder_path: str) -> None:
+    def load(
+        self,
+        detector_path: str,
+        embedder_path: str,
+        liveness_path: Optional[str] = None,
+    ) -> None:
+        if liveness_path:
+            logger.warning(
+                "RKNN backend does not support liveness yet (P2); "
+                "ignoring liveness model %s", liveness_path,
+            )
         core_mask = _resolve_core_mask()
         logger.info(
             "Initializing RKNN backend (core_mask=%d, AUTO=%d)",
@@ -409,3 +419,10 @@ class RKNNBackend(FaceBackend):
                     [emb, np.zeros(512 - emb.size, dtype=np.float32)]
                 )
         return emb
+
+    def liveness_raw(self, face_crop_bgr: np.ndarray) -> float:
+        raise NotImplementedError(
+            "Liveness (MiniFASNet) is not implemented for the RKNN backend "
+            "yet — planned for P2 (build the .rknn with tools/build_rknn.py "
+            "and mirror HailoBackend.liveness_raw)."
+        )

@@ -15,7 +15,7 @@ Contract:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
@@ -28,8 +28,22 @@ class FaceBackend(ABC):
     """Hardware-abstract face detection + embedding backend."""
 
     @abstractmethod
-    def load(self, detector_path: str, embedder_path: str) -> None:
-        """Load detector and embedder models from disk."""
+    def load(
+        self,
+        detector_path: str,
+        embedder_path: str,
+        liveness_path: Optional[str] = None,
+    ) -> None:
+        """Load detector and embedder models from disk.
+
+        Args:
+            detector_path: SCRFD detector model file.
+            embedder_path: ArcFace embedder model file.
+            liveness_path: optional MiniFASNet anti-spoofing model file.
+                ``None`` means liveness is not requested for this backend.
+                Backends that do not (yet) support liveness must accept and
+                ignore this argument (with a warning) instead of raising.
+        """
 
     @abstractmethod
     def detect_raw(
@@ -60,6 +74,31 @@ class FaceBackend(ABC):
         Returns:
             fp32 array shape ``(512,)``. **Not** L2-normalized.
         """
+
+    @abstractmethod
+    def liveness_raw(self, face_crop_bgr: np.ndarray) -> float:
+        """
+        Run passive anti-spoofing (MiniFASNet) on a face crop.
+
+        Args:
+            face_crop_bgr: ``(80, 80, 3)`` BGR **uint8** crop produced by
+                :func:`liveness.crop_liveness_input` (detection bbox expanded
+                by scale=2.7, resized to 80x80, NO normalization — values stay
+                0-255, channel order stays BGR; see ``liveness.py`` module
+                docstring for the Minivision transform rationale).
+
+        Returns:
+            Probability (0-1) that the face is *real* (softmax index 1).
+
+        Raises:
+            NotImplementedError: backend has no liveness support yet.
+            FaceBackendError: liveness model not loaded or inference failed.
+        """
+
+    @property
+    def liveness_loaded(self) -> bool:
+        """True if a liveness model is loaded and ``liveness_raw`` is usable."""
+        return False
 
     @property
     @abstractmethod

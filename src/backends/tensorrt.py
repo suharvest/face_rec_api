@@ -334,7 +334,17 @@ class TensorRTBackend(FaceBackend):
         self._closed = False
 
     # -- lifecycle ------------------------------------------------------- #
-    def load(self, detector_path: str, embedder_path: str) -> None:
+    def load(
+        self,
+        detector_path: str,
+        embedder_path: str,
+        liveness_path: Optional[str] = None,
+    ) -> None:
+        if liveness_path:
+            logger.warning(
+                "TensorRT backend does not support liveness yet (P2); "
+                "ignoring liveness model %s", liveness_path,
+            )
         self._detector = _TRTEngine("detector", detector_path, self._logger_trt)
         self._detector.load()
 
@@ -601,3 +611,10 @@ class TensorRTBackend(FaceBackend):
                     [emb, np.zeros(512 - emb.size, dtype=np.float32)]
                 )
         return emb
+
+    def liveness_raw(self, face_crop_bgr: np.ndarray) -> float:
+        raise NotImplementedError(
+            "Liveness (MiniFASNet) is not implemented for the TensorRT "
+            "backend yet — planned for P2 (build the engine with "
+            "tools/build_engine.sh and mirror HailoBackend.liveness_raw)."
+        )
