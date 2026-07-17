@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -18,6 +19,7 @@ import numpy as np
 from skimage.transform import SimilarityTransform
 
 import config
+import liveness as liveness_util
 from backends import FaceBackend, FaceBackendError, create_backend
 
 logger = logging.getLogger(__name__)
@@ -90,6 +92,30 @@ def _align(image: np.ndarray, landmarks: List[Tuple[float, float]],
     return cv2.warpAffine(image, M, (output_size, output_size), borderValue=0.0)
 
 
+def resolve_liveness_path() -> Tuple[Optional[str], str]:
+    """Resolve the liveness model path from config, with graceful degradation.
+
+    Returns:
+        ``(path, status)`` — ``path`` is the model file to load (or None),
+        ``status`` is one of:
+          - ``"loaded"``   liveness requested and model file exists;
+          - ``"disabled"`` liveness turned off via ``LIVENESS_ENABLED``;
+          - ``"missing"``  liveness requested but model file absent —
+            auto-degraded to off (warning, no crash).
+    """
+    if not config.LIVENESS_ENABLED:
+        return None, "disabled"
+    path = config.FACE_LIVENESS_MODEL
+    if not os.path.exists(path):
+        logger.warning(
+            "LIVENESS_ENABLED=true but liveness model not found at %s — "
+            "liveness auto-disabled (recognition continues without "
+            "anti-spoofing)", path,
+        )
+        return None, "missing"
+    return path, "loaded"
+
+
 # --------------------------------------------------------------------------- #
 # Pipeline
 # --------------------------------------------------------------------------- #
@@ -113,18 +139,47 @@ class FacePipeline:
             backend_name: override for backend selection.
         """
         if backend is None:
+            liveness_path, liveness_status = resolve_liveness_path()
             backend = create_backend(backend_name or config.FACE_BACKEND)
             backend.load(
                 detector_path=detection_model_path or config.FACE_DETECTION_MODEL,
                 embedder_path=recognition_model_path or config.FACE_RECOGNITION_MODEL,
+                liveness_path=liveness_path,
             )
+            if liveness_path is not None and not backend.liveness_loaded:
+                # Backend accepted but ignored the model (no liveness support).
+                logger.warning(
+                    "Backend %s has no liveness support — liveness disabled",
+                    backend.backend_name,
+                )
+                liveness_status = "disabled"
+        else:
+            # Pre-instantiated (and pre-loaded) backend, e.g. in tests.
+            if not config.LIVENESS_ENABLED:
+                liveness_status = "disabled"
+            elif backend.liveness_loaded:
+                liveness_status = "loaded"
+            else:
+                logger.warning(
+                    "LIVENESS_ENABLED=true but provided backend has no "
+                    "liveness model loaded — liveness disabled"
+                )
+                liveness_status = "missing"
         self.backend: FaceBackend = backend
+        # "loaded" | "disabled" | "missing" — surfaced by /health.
+        self.liveness_status: str = liveness_status
         self._anchor_cache: Dict[Tuple[int, int], Dict[int, np.ndarray]] = {}
         logger.info(
-            "FacePipeline ready (backend=%s, model_tag=%s)",
+            "FacePipeline ready (backend=%s, model_tag=%s, liveness=%s)",
             self.backend.backend_name,
             self.backend.model_tag,
+            self.liveness_status,
         )
+
+    @property
+    def liveness_active(self) -> bool:
+        """True when the anti-spoofing step actually runs."""
+        return self.liveness_status == "loaded"
 
     # ------------------------------------------------------------------ #
     def close(self) -> None:
@@ -248,6 +303,38 @@ class FacePipeline:
         return _align(image, landmarks)
 
     # ------------------------------------------------------------------ #
+    def liveness_score(self, image: np.ndarray, bbox: Dict) -> float:
+        """Passive anti-spoofing score (real probability 0-1) for one face.
+
+        The bbox-expansion crop (Minivision CropImage, scale=2.7, clamped to
+        image borders) + 80x80 resize live in the shared ``liveness`` util so
+        every backend consumes the identical input; only the inference call
+        itself (``backend.liveness_raw``) is backend-specific.
+        """
+        crop = liveness_util.crop_liveness_input(
+            image,
+            (bbox["x"], bbox["y"], bbox["w"], bbox["h"]),
+            scale=config.LIVENESS_CROP_SCALE,
+        )
+        return float(self.backend.liveness_raw(crop))
+
+    def _annotate_liveness(
+        self, image: np.ndarray, face: Dict
+    ) -> Tuple[Optional[float], Optional[bool]]:
+        """Run liveness for one detected face and attach score/flag to it.
+
+        Returns ``(liveness_score, live)`` — both None when liveness is
+        inactive.
+        """
+        if not self.liveness_active:
+            return None, None
+        score = self.liveness_score(image, face["bbox"])
+        live = score >= config.LIVENESS_THRESHOLD
+        face["liveness_score"] = score
+        face["live"] = live
+        return score, live
+
+    # ------------------------------------------------------------------ #
     def process_image(self, image: np.ndarray, strategy: str = "largest") -> Dict:
         """Run full pipeline; returns dict with success / embedding / face / error."""
         try:
@@ -276,6 +363,25 @@ class FacePipeline:
             else:
                 face = faces[0]
 
+            # Passive anti-spoofing — runs on the raw detection bbox BEFORE
+            # align/embed so spoof faces never reach recognition in reject
+            # mode. No-op (None/None) when liveness is disabled/missing, so
+            # behavior is identical to the pre-liveness pipeline.
+            liveness_score, live = self._annotate_liveness(image, face)
+            if live is False and config.LIVENESS_FAIL_ACTION == "reject":
+                return {
+                    "success": False,
+                    "error": (
+                        f"Spoof detected (liveness_score="
+                        f"{liveness_score:.4f} < {config.LIVENESS_THRESHOLD})"
+                    ),
+                    "reason": "spoof",
+                    "face": face,
+                    "embedding": None,
+                    "live": live,
+                    "liveness_score": liveness_score,
+                }
+
             aligned = self.align(image, face["landmarks"])
             embedding = self.embed(aligned)
 
@@ -285,6 +391,8 @@ class FacePipeline:
                 "face": face,
                 "aligned": aligned,
                 "error": None,
+                "live": live,
+                "liveness_score": liveness_score,
             }
 
         except FaceBackendError as exc:
@@ -332,6 +440,21 @@ class FacePipeline:
         faces = self.detect(image)
         out: List[Dict] = []
         for face in faces:
+            liveness_score, live = self._annotate_liveness(image, face)
+            if live is False and config.LIVENESS_FAIL_ACTION == "reject":
+                # Spoof face: keep detection info but never embed/recognize.
+                out.append(
+                    {
+                        "bbox": face["bbox"],
+                        "landmarks": face["landmarks"],
+                        "confidence": face["confidence"],
+                        "embedding": None,
+                        "aligned": None,
+                        "live": live,
+                        "liveness_score": liveness_score,
+                    }
+                )
+                continue
             try:
                 aligned = self.align(image, face["landmarks"])
                 emb = self.embed(aligned)
@@ -345,6 +468,8 @@ class FacePipeline:
                     "confidence": face["confidence"],
                     "embedding": emb,
                     "aligned": aligned,
+                    "live": live,
+                    "liveness_score": liveness_score,
                 }
             )
         return out
