@@ -1,0 +1,119 @@
+# Raspberry Pi 5 + Hailo-8 runtime image for the Standalone Face Recognition Service.
+#
+# Targets: Pi OS (bookworm/trixie) aarch64 hosts with the Hailo PCIe kernel
+# driver (hailo_pci) + userland libhailort installed and *held* at 4.21.0:
+#   sudo apt-mark hold hailort hailort-pcie-driver
+#
+# HailoRT ABI rule (see gotchas-rpi-hailo.md #1): kernel driver hailo_pci,
+# userland libhailort.so and the Python binding _pyhailort must all match
+# major.minor. Layout chosen here:
+# - Python binding: the repo-bundled cp311 wheel
+#   `hailort-4.21.0-cp311-cp311-linux_aarch64.whl` is installed INSIDE the
+#   image against the image's Python 3.11. This decouples us from the host
+#   Python (Pi OS trixie ships 3.13 — a host-mounted _pyhailort would be a
+#   cp313 .so and fail to import in a 3.11 container).
+# - libhailort.so.4.21.0 is bind-mounted from the host at run time
+#   (`-v /usr/lib/libhailort.so.4.21.0:/usr/lib/libhailort.so.4.21.0:ro`),
+#   same philosophy as Dockerfile.rknn's librknnrt.so mount. The wheel's
+#   _pyhailort links against the exact soname `libhailort.so.4.21.0`, so a
+#   version drift on the host fails loudly at import time instead of
+#   corrupting inference. The 4.21.0 arm64 .deb is not redistributable via
+#   apt (RPi archive only carries 4.20/4.23), hence the mount instead of a
+#   dpkg -i layer.
+#
+# Image philosophy: slim runtime, ~1 GB unpacked.
+# - Base: python:3.11-slim-bookworm.
+# - Inference deps only — no torch, no onnxruntime, no dev tools. gcc is
+#   installed transiently in the same layer purely to compile `netifaces`
+#   (a hailort wheel dependency with no aarch64 wheel on PyPI) and purged
+#   before the layer is committed.
+# - HEF models and embeddings data are bind-mounted, not baked in.
+# - Runs as non-root user `frc` (uid 1000 — matches the default `harvest`
+#   user on the Pi so the mounted /data stays writable). /dev/hailo0 is
+#   world-rw on Pi OS, so no extra group is needed.
+#
+# Run example (see docs/deployment.md for the full annotated command):
+#   docker run -d --name frc-hailo \
+#     --restart unless-stopped \
+#     --device /dev/hailo0 \
+#     -p 8001:8001 \
+#     -v /usr/lib/libhailort.so.4.21.0:/usr/lib/libhailort.so.4.21.0:ro \
+#     -v $HOME/face_rec_api/src:/app/src:ro \
+#     -v $HOME/face_rec_api/models/hailo:/models:ro \
+#     -v $HOME/face_rec_api/data:/data \
+#     -v $HOME/face_rec_api/photos:/photos \
+#     -e LIVENESS_ENABLED=true \
+#     --log-opt max-size=10m --log-opt max-file=3 \
+#     face_rec_api:hailo
+
+FROM python:3.11-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Minimal system deps: libgl + libglib for opencv-python-headless,
+# libstdc++/libgcc for _pyhailort. DEB_MIRROR build-arg lets you swap to a
+# regional mirror when deb.debian.org is unreachable from the build host.
+ARG DEB_MIRROR=http://deb.debian.org
+RUN sed -i "s|http://deb.debian.org|${DEB_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null \
+    || sed -i "s|http://deb.debian.org|${DEB_MIRROR}|g" /etc/apt/sources.list 2>/dev/null \
+    || true \
+ && apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+        libstdc++6 \
+        libgcc-s1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+WORKDIR /app
+
+# Runtime Python deps + the HailoRT cp311 binding wheel.
+# gcc/libc6-dev are needed only to build `netifaces` (hailort dep, sdist-only
+# on aarch64) and are purged in the same layer to keep the image slim.
+ARG PIP_INDEX=https://pypi.org/simple
+COPY hailort-4.21.0-cp311-cp311-linux_aarch64.whl /tmp/
+RUN pip3 config set global.index-url "${PIP_INDEX}" \
+ && apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \
+ && pip3 install --no-cache-dir --upgrade pip \
+ && pip3 install --no-cache-dir \
+        "fastapi==0.104.1" \
+        "uvicorn[standard]==0.24.0.post1" \
+        "pydantic==2.5.0" \
+        "numpy==1.26.2" \
+        "opencv-python-headless==4.8.1.78" \
+        "scikit-image==0.22.0" \
+        "Pillow" \
+        "python-multipart" \
+        /tmp/hailort-4.21.0-cp311-cp311-linux_aarch64.whl \
+ && rm /tmp/hailort-4.21.0-cp311-cp311-linux_aarch64.whl \
+ && apt-get purge -y gcc libc6-dev \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/* \
+ && apt-get clean
+
+# Baked-in copy of the source; typically shadowed by a `-v src:/app/src:ro`
+# bind-mount at run time (same pattern as the Jetson deployment) so code can
+# be updated with a `git pull` + container restart, no rebuild.
+COPY src ./src
+
+RUN useradd --uid 1000 --create-home frc \
+ && mkdir -p /models /data /photos \
+ && chown frc:frc /data /photos
+USER frc
+
+ENV FACE_BACKEND=hailo \
+    MODELS_PATH=/models \
+    PHOTOS_FOLDER=/photos \
+    EMBEDDINGS_JSON=/data/embeddings.json \
+    LIVENESS_ENABLED=true \
+    PYTHONPATH=/app/src \
+    HOST=0.0.0.0 \
+    PORT=8001
+
+EXPOSE 8001
+
+CMD ["python3", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8001", "--app-dir", "/app/src"]
