@@ -33,6 +33,8 @@ import numpy as np
 
 from .base import FaceBackend, FaceBackendError
 
+import liveness as liveness_util
+
 logger = logging.getLogger(__name__)
 
 # Deferred TensorRT / CUDA imports — only required when this backend is loaded.
@@ -101,6 +103,8 @@ _DET_INPUT_H = 640
 _DET_INPUT_W = 640
 _EMB_INPUT_H = 112
 _EMB_INPUT_W = 112
+_LIV_INPUT_H = liveness_util.LIVENESS_INPUT_SIZE  # 80
+_LIV_INPUT_W = liveness_util.LIVENESS_INPUT_SIZE  # 80
 
 
 # ---- Engine helpers ------------------------------------------------------- #
@@ -161,6 +165,8 @@ class _TRTEngine:
                         shape = (1, 3, _DET_INPUT_H, _DET_INPUT_W)
                     elif self.name == "embedder":
                         shape = (1, 3, _EMB_INPUT_H, _EMB_INPUT_W)
+                    elif self.name == "liveness":
+                        shape = (1, 3, _LIV_INPUT_H, _LIV_INPUT_W)
                     else:
                         raise FaceBackendError(
                             f"Cannot resolve dynamic input shape for {self.name}/{tname}"
@@ -328,8 +334,10 @@ class TensorRTBackend(FaceBackend):
         self._logger_trt = trt.Logger(trt.Logger.WARNING)
         self._detector: Optional[_TRTEngine] = None
         self._embedder: Optional[_TRTEngine] = None
+        self._liveness: Optional[_TRTEngine] = None
         self._det_lock = threading.Lock()
         self._emb_lock = threading.Lock()
+        self._liv_lock = threading.Lock()
         self._det_output_map: Dict[str, Tuple[int, str]] = {}
         self._closed = False
 
@@ -340,16 +348,17 @@ class TensorRTBackend(FaceBackend):
         embedder_path: str,
         liveness_path: Optional[str] = None,
     ) -> None:
-        if liveness_path:
-            logger.warning(
-                "TensorRT backend does not support liveness yet (P2); "
-                "ignoring liveness model %s", liveness_path,
-            )
         self._detector = _TRTEngine("detector", detector_path, self._logger_trt)
         self._detector.load()
 
         self._embedder = _TRTEngine("embedder", embedder_path, self._logger_trt)
         self._embedder.load()
+
+        if liveness_path:
+            self._liveness = _TRTEngine(
+                "liveness", liveness_path, self._logger_trt
+            )
+            self._liveness.load()
 
         # Build SCRFD output mapping by inspecting per-tensor shapes.
         self._det_output_map = self._classify_scrfd_outputs(self._detector)
@@ -372,9 +381,14 @@ class TensorRTBackend(FaceBackend):
         try:
             dummy_bgr = np.zeros((640, 640, 3), dtype=np.uint8)
             dummy_face = np.zeros((112, 112, 3), dtype=np.uint8)
+            dummy_liv = np.zeros(
+                (_LIV_INPUT_H, _LIV_INPUT_W, 3), dtype=np.uint8
+            )
             for _ in range(3):
                 self.detect_raw(dummy_bgr)
                 self.embed_raw(dummy_face)
+                if self._liveness is not None:
+                    self.liveness_raw(dummy_liv)
             logger.info("TensorRTBackend warmup complete (3 iterations)")
         except Exception as exc:  # noqa: BLE001
             logger.warning("TensorRTBackend warmup failed: %s", exc)
@@ -386,7 +400,7 @@ class TensorRTBackend(FaceBackend):
             return
         self._closed = True
         logger.info("Shutting down TensorRTBackend...")
-        for eng in (self._detector, self._embedder):
+        for eng in (self._detector, self._embedder, self._liveness):
             if eng is not None:
                 try:
                     eng.close()
@@ -402,6 +416,10 @@ class TensorRTBackend(FaceBackend):
     @property
     def model_tag(self) -> str:
         return self.MODEL_TAG
+
+    @property
+    def liveness_loaded(self) -> bool:
+        return self._liveness is not None
 
     @property
     def detector_input_hw(self) -> Tuple[int, int]:
@@ -613,8 +631,37 @@ class TensorRTBackend(FaceBackend):
         return emb
 
     def liveness_raw(self, face_crop_bgr: np.ndarray) -> float:
-        raise NotImplementedError(
-            "Liveness (MiniFASNet) is not implemented for the TensorRT "
-            "backend yet — planned for P2 (build the engine with "
-            "tools/build_engine.sh and mirror HailoBackend.liveness_raw)."
-        )
+        """MiniFASNet passive anti-spoofing on an 80x80 BGR uint8 crop.
+
+        Preprocessing contract (see ``liveness.py`` docstring): the crop is
+        already bbox-expanded + resized by the shared pipeline helper. The
+        ONNX->engine input is NCHW float32, raw 0-255 values, channel order
+        stays **BGR** — no /255, no mean/std (Minivision's training-time
+        transform keeps raw pixel values).
+        """
+        if self._liveness is None:
+            raise FaceBackendError(
+                "Liveness model not loaded (backend was initialised without "
+                "a liveness engine)"
+            )
+
+        img = face_crop_bgr
+        if img.shape[:2] != (_LIV_INPUT_H, _LIV_INPUT_W):
+            img = cv2.resize(img, (_LIV_INPUT_W, _LIV_INPUT_H))
+        # HWC BGR uint8 -> NCHW float32, values kept 0-255, order kept BGR.
+        chw = img.transpose(2, 0, 1).astype(np.float32, copy=False)
+        nchw = np.ascontiguousarray(np.expand_dims(chw, 0))
+
+        with self._liv_lock:
+            raw = self._liveness.infer(nchw)
+
+        # Single output: 1x3 logits [2D-spoof, real, 3D-spoof] (or 1x2
+        # [fake, real] for 2-class variants) — softmax applied on host.
+        buf = next(iter(raw.values()))
+        logits = buf.flatten().astype(np.float32, copy=False)
+        if logits.size not in (2, 3):
+            raise FaceBackendError(
+                f"Unexpected liveness output size: {logits.size}"
+            )
+        probs = liveness_util.softmax(logits)
+        return float(probs[liveness_util.LIVENESS_REAL_INDEX])
