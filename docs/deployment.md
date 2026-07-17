@@ -121,10 +121,32 @@ Dependency or HailoRT changes require an image rebuild (see Build).
 
 ## orin-nano (Jetson Orin Nano, JetPack 6.2)
 
-Image `face_rec_api:jetson` (built from `Dockerfile.jetson` on the device;
-TensorRT engines are device-built via `tools/build_engine.sh`). TRT/CUDA
-libraries are bind-mounted from the host JetPack install — the image itself
-carries no CUDA.
+Image `face_rec_api:jetson` (built from `Dockerfile.jetson`; TensorRT
+engines are device-built via `tools/build_engine.sh`). TRT/CUDA libraries
+are bind-mounted from the host JetPack install — the image itself carries
+no CUDA.
+
+### Build
+
+The image is plain `ubuntu:22.04` arm64 + Python 3.10 (matching the host
+JetPack cp310 TRT bindings) + pip runtime deps — no GPU needed at build
+time, so it can be built anywhere with an arm64 builder:
+
+```bash
+# On a dev machine with docker buildx (e.g. Mac):
+docker buildx build --platform linux/arm64 -f Dockerfile.jetson \
+  -t face_rec_api:jetson --load .
+docker save face_rec_api:jetson | gzip > /tmp/frc-jetson.tar.gz
+# transfer to device, then: docker load < /tmp/frc-jetson.tar.gz
+
+# Or natively on the Jetson:
+docker build -f Dockerfile.jetson -t face_rec_api:jetson .
+```
+
+Note: the previous base `nvcr.io/nvidia/l4t-base:r36.2.0` implicitly set
+`NVIDIA_VISIBLE_DEVICES` / `NVIDIA_DRIVER_CAPABILITIES`; the ubuntu:22.04
+Dockerfile sets them explicitly. Containers must still run with
+`--runtime nvidia`.
 
 ### Run
 
