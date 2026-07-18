@@ -106,6 +106,18 @@ _EMB_INPUT_W = 112
 _LIV_INPUT_H = liveness_util.LIVENESS_INPUT_SIZE  # 80
 _LIV_INPUT_W = liveness_util.LIVENESS_INPUT_SIZE  # 80
 
+# ---- ONNX build-fallback parameters --------------------------------------- #
+# Mirrors tools/build_engine.sh + tools/build_liveness_jetson.md exactly:
+#   fp16, per-model workspace pool, and (detector only) an optimization
+#   profile pinning the dynamic input to 1x3x640x640 (min=opt=max).
+_ONNX_SUBDIR = "onnx"
+_BUILD_WORKSPACE_MB = {"detector": 1024, "embedder": 512, "liveness": 256}
+_CANONICAL_INPUT_HW = {
+    "detector": (_DET_INPUT_H, _DET_INPUT_W),
+    "embedder": (_EMB_INPUT_H, _EMB_INPUT_W),
+    "liveness": (_LIV_INPUT_H, _LIV_INPUT_W),
+}
+
 
 # ---- Engine helpers ------------------------------------------------------- #
 class _TRTEngine:
@@ -125,20 +137,141 @@ class _TRTEngine:
         self.input_name: Optional[str] = None
         self.output_names: List[str] = []
 
+    # -- ONNX build fallback ---------------------------------------------- #
+    def _onnx_fallback_path(self) -> str:
+        """`<engine_dir>/onnx/<engine_stem>.onnx` next to the engine file."""
+        stem = os.path.splitext(os.path.basename(self.engine_path))[0]
+        return os.path.join(
+            os.path.dirname(self.engine_path), _ONNX_SUBDIR, f"{stem}.onnx"
+        )
+
+    def _build_from_onnx(self, onnx_path: str, reason: str) -> bytes:
+        """Build a serialized engine from ONNX with the TensorRT Python API.
+
+        Parameters mirror ``tools/build_engine.sh`` /
+        ``tools/build_liveness_jetson.md``: fp16, per-model workspace pool
+        size, and dynamic inputs pinned to the canonical shape via an
+        optimization profile with min=opt=max.
+
+        Best-effort persists the built engine back to ``self.engine_path``
+        so subsequent starts skip the rebuild; an unwritable models dir
+        (read-only bind mount) only costs a warning.
+        """
+        logger.warning(
+            "TRT %s engine %s (%s) — building from ONNX %s; "
+            "this may take several minutes...",
+            self.name,
+            reason,
+            self.engine_path,
+            onnx_path,
+        )
+
+        builder = trt.Builder(self._logger_trt)
+        try:  # TensorRT < 10 requires the EXPLICIT_BATCH flag; 10+ dropped it
+            flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+        except AttributeError:
+            flags = 0
+        network = builder.create_network(flags)
+        parser = trt.OnnxParser(network, self._logger_trt)
+        with open(onnx_path, "rb") as f:
+            if not parser.parse(f.read()):
+                errs = "; ".join(
+                    str(parser.get_error(i)) for i in range(parser.num_errors)
+                )
+                raise FaceBackendError(
+                    f"Failed to parse ONNX for {self.name}: {onnx_path}: {errs}"
+                )
+
+        config = builder.create_builder_config()
+        if builder.platform_has_fast_fp16:
+            config.set_flag(trt.BuilderFlag.FP16)
+        workspace_mb = _BUILD_WORKSPACE_MB.get(self.name, 512)
+        config.set_memory_pool_limit(
+            trt.MemoryPoolType.WORKSPACE, workspace_mb << 20
+        )
+
+        # Pin any dynamic input dims to the canonical model shape
+        # (build_engine.sh does the same with --min/opt/maxShapes).
+        profile = builder.create_optimization_profile()
+        profile_needed = False
+        for i in range(network.num_inputs):
+            inp = network.get_input(i)
+            if any(d < 0 for d in tuple(inp.shape)):
+                hw = _CANONICAL_INPUT_HW.get(self.name)
+                if hw is None:
+                    raise FaceBackendError(
+                        f"Cannot pin dynamic ONNX input {inp.name} for "
+                        f"unknown engine role {self.name}"
+                    )
+                shape = (1, 3, hw[0], hw[1])
+                profile.set_shape(inp.name, shape, shape, shape)
+                profile_needed = True
+        if profile_needed:
+            config.add_optimization_profile(profile)
+
+        serialized = builder.build_serialized_network(network, config)
+        if serialized is None:
+            raise FaceBackendError(
+                f"TensorRT failed to build {self.name} engine from {onnx_path}"
+            )
+        engine_bytes = bytes(serialized)
+
+        try:
+            os.makedirs(os.path.dirname(self.engine_path) or ".", exist_ok=True)
+            tmp_path = f"{self.engine_path}.tmp.{os.getpid()}"
+            with open(tmp_path, "wb") as f:
+                f.write(engine_bytes)
+            os.replace(tmp_path, self.engine_path)
+            logger.info(
+                "TRT %s engine built from ONNX and saved to %s (%.1f MB)",
+                self.name,
+                self.engine_path,
+                len(engine_bytes) / 1e6,
+            )
+        except OSError as exc:
+            logger.warning(
+                "TRT %s engine built but could not be persisted to %s "
+                "(read-only models dir?): %s — using in-memory engine; "
+                "it will be rebuilt on next start",
+                self.name,
+                self.engine_path,
+                exc,
+            )
+        return engine_bytes
+
     # -- lifecycle -------------------------------------------------------- #
     def load(self) -> None:
-        if not os.path.exists(self.engine_path):
+        onnx_path = self._onnx_fallback_path()
+        built_from_onnx = False
+
+        if os.path.exists(self.engine_path):
+            with open(self.engine_path, "rb") as f:
+                engine_bytes = f.read()
+        elif os.path.exists(onnx_path):
+            engine_bytes = self._build_from_onnx(onnx_path, "missing")
+            built_from_onnx = True
+        else:
             raise FileNotFoundError(
                 f"{self.name} engine not found: {self.engine_path}\n"
                 "Engines are JetPack + sm-version specific. Build with "
                 "`tools/build_engine.sh` on the target Jetson device."
             )
 
-        with open(self.engine_path, "rb") as f:
-            engine_bytes = f.read()
-
         runtime = trt.Runtime(self._logger_trt)
-        self.engine = runtime.deserialize_cuda_engine(engine_bytes)
+        try:
+            self.engine = runtime.deserialize_cuda_engine(engine_bytes)
+        except Exception as exc:  # noqa: BLE001 — TRT raises on hard mismatch
+            logger.warning(
+                "TRT %s engine deserialization raised: %s", self.name, exc
+            )
+            self.engine = None
+        if self.engine is None and not built_from_onnx and os.path.exists(onnx_path):
+            # Typical cause: engine built under a different TensorRT/JetPack
+            # version than the runtime device. Rebuild from ONNX in place.
+            engine_bytes = self._build_from_onnx(
+                onnx_path, "incompatible (deserialization failed)"
+            )
+            self.engine = runtime.deserialize_cuda_engine(engine_bytes)
         if self.engine is None:
             raise FaceBackendError(
                 f"Failed to deserialize {self.name} engine: {self.engine_path}"
