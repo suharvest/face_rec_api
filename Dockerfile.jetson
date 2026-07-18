@@ -63,6 +63,14 @@ RUN pip3 install --no-cache-dir --upgrade pip \
         "python-multipart" \
         "cuda-python>=12.0,<13.0"
 
+# Bake default TensorRT engines (built on JetPack 6.2 / TensorRT 10.3,
+# Orin SM 8.7) plus the source ONNX models. If the runtime device's TensorRT
+# can't deserialize the baked engines (different JetPack), the backend
+# rebuilds them from /models/onnx at startup (src/backends/tensorrt.py).
+# A `-v ...:/models` bind mount still overrides everything, as before.
+COPY --chown=1000:1000 models/jetson/*.engine /models/
+COPY --chown=1000:1000 models/onnx/*.onnx /models/onnx/
+
 # Copy application source.
 COPY src ./src
 COPY start_standalone.sh ./
