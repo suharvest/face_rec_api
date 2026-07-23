@@ -6,6 +6,7 @@ optionally matches them against a JSON-backed vector store. Backend selection
 (Hailo / Jetson / RKNN) is controlled via the ``FACE_BACKEND`` env var.
 """
 import base64
+import hmac
 import logging
 import time
 from typing import List, Optional
@@ -13,7 +14,7 @@ from typing import List, Optional
 import cv2
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -43,6 +44,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def require_auth(authorization: Optional[str] = Header(None)):
+    """Bearer-token gate. No-op when config.API_TOKEN is unset (rollout-safe);
+    constant-time comparison when enforced."""
+    expected = config.API_TOKEN
+    if not expected:
+        return
+    presented = ""
+    if authorization and authorization.startswith("Bearer "):
+        presented = authorization[len("Bearer "):]
+    if not presented or not hmac.compare_digest(presented, expected):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="unauthorized")
+
 
 # Global state
 face_pipeline: Optional[FacePipeline] = None
@@ -171,6 +185,10 @@ async def startup_event():
     logger.info("=" * 60)
     logger.info("Starting Standalone Face Recognition Service")
     logger.info("Backend: %s", config.FACE_BACKEND)
+    if config.API_TOKEN:
+        logger.info("Auth: ENFORCED (Bearer token required on data endpoints)")
+    else:
+        logger.warning("Auth: DISABLED (FACE_API_TOKEN unset) — all endpoints open")
     logger.info("=" * 60)
 
     try:
@@ -296,7 +314,7 @@ async def health():
     )
 
 
-@app.post("/infer", response_model=InferResponse)
+@app.post("/infer", response_model=InferResponse, dependencies=[Depends(require_auth)])
 async def infer(request: InferRequest):
     """
     Stateless face inference: returns all detected faces + embeddings.
@@ -349,7 +367,7 @@ async def infer(request: InferRequest):
     )
 
 
-@app.post("/recognize", response_model=RecognizeResponse)
+@app.post("/recognize", response_model=RecognizeResponse, dependencies=[Depends(require_auth)])
 async def recognize(request: RecognizeRequest):
     """Recognize face against the in-memory vector store."""
     start_time = time.time()
@@ -382,7 +400,7 @@ async def recognize(request: RecognizeRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/enroll", response_model=EnrollResponse)
+@app.post("/enroll", response_model=EnrollResponse, dependencies=[Depends(require_auth)])
 async def enroll(request: EnrollRequest):
     try:
         result = face_pipeline.process_image_base64(
@@ -408,7 +426,7 @@ async def enroll(request: EnrollRequest):
         )
 
 
-@app.post("/reload", response_model=ReloadResponse)
+@app.post("/reload", response_model=ReloadResponse, dependencies=[Depends(require_auth)])
 async def reload(request: ReloadRequest = ReloadRequest(force=False)):
     start_time = time.time()
     try:
@@ -428,7 +446,7 @@ async def reload(request: ReloadRequest = ReloadRequest(force=False)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.delete("/remove/{name}", response_model=RemoveResponse)
+@app.delete("/remove/{name}", response_model=RemoveResponse, dependencies=[Depends(require_auth)])
 async def remove(name: str):
     try:
         removed = vector_store.remove(name)
@@ -444,7 +462,7 @@ async def remove(name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/list", response_model=ListResponse)
+@app.get("/list", response_model=ListResponse, dependencies=[Depends(require_auth)])
 async def list_users():
     try:
         users = vector_store.list_all()
@@ -454,7 +472,7 @@ async def list_users():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/detect_and_embed", response_model=DetectAndEmbedResponse)
+@app.post("/detect_and_embed", response_model=DetectAndEmbedResponse, dependencies=[Depends(require_auth)])
 async def detect_and_embed(request: DetectAndEmbedRequest):
     """Debug endpoint: detect + embed first (largest) face. Kept for compatibility."""
     start_time = time.time()

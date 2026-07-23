@@ -82,6 +82,14 @@ MULTIPLE_FACES_STRATEGY = os.getenv("MULTIPLE_FACES_STRATEGY", "largest")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8001"))
 
+# Auth: shared Bearer token gating every data/mutating endpoint (/health and /
+# stay open for liveness probes). The warehouse backend already sends this token
+# as ``Authorization: Bearer`` (see endpoint_client._headers). Leave EMPTY to
+# disable auth entirely — lets a new build roll out with no behavior change, then
+# enforcement turns on the moment this and the tenant's endpoint auth_token are
+# set to the same value.
+API_TOKEN = os.getenv("FACE_API_TOKEN", "").strip()
+
 # Debug settings
 DEBUG_SAVE_IMAGES = os.getenv("DEBUG_SAVE_IMAGES", "false").lower() in ("true", "1", "t")
 DEBUG_SAVE_INTERVAL_S = int(os.getenv("DEBUG_SAVE_INTERVAL_S", "10"))
