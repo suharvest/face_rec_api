@@ -1,0 +1,79 @@
+# Jetson runtime image for the unmanned-store-access door stack.
+#
+# Difference from Dockerfile.jetson, and why each one exists:
+#
+# 1. No weights in the image. Dockerfile.jetson bakes models/jetson/*.engine and
+#    models/onnx/*.onnx. Those are derived from InsightFace releases, whose
+#    licence is non-commercial (MODEL_LICENSE.md). This image therefore carries
+#    code only; /models is a mount point and the container refuses to do useful
+#    work until something is mounted there. Engines are JetPack + SM specific
+#    anyway and are meant to be built on the target with tools/build_engine.sh.
+#
+# 2. Port 8080, not 8001. The solution's edge compose
+#    (sensecraft-solutions solutions/unmanned_store_access/assets/edge/docker-compose.yml)
+#    talks to http://face-rec-api:8080 and publishes 18080:8080. PORT is still
+#    an env var, so a different compose can move it.
+#
+# 3. curl is installed. That same compose healthchecks with
+#    ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]; ubuntu:22.04 has
+#    no curl, and a healthcheck that can never pass keeps access-node blocked
+#    on `condition: service_healthy` forever.
+#
+# CUDA / TensorRT libs and the TRT Python bindings are bind-mounted from the
+# host JetPack install at run time, exactly as in Dockerfile.jetson. Containers
+# must run with `--runtime nvidia`.
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Python 3.10 matches the host TRT cp310 bindings; libglib2.0-0 is what
+# opencv-python-headless needs (libgthread); curl is for the compose healthcheck.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        libglib2.0-0 \
+        curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+WORKDIR /app
+
+# Installed into the system interpreter so the TensorRT bindings bind-mounted
+# at /usr/lib/python3.10/dist-packages stay importable.
+RUN pip3 install --no-cache-dir --upgrade pip \
+ && pip3 install --no-cache-dir \
+        "fastapi==0.104.1" \
+        "uvicorn[standard]==0.24.0.post1" \
+        "pydantic==2.5.0" \
+        "numpy==1.26.2" \
+        "opencv-python-headless==4.8.1.78" \
+        "Pillow" \
+        "python-multipart" \
+        "cuda-python>=12.0,<13.0"
+
+COPY src ./src
+COPY start_standalone.sh ./
+
+# /models, /photos and /data are mount points. MODELS_PATH holds the .engine
+# files (and models/onnx for the startup rebuild path); nothing is shipped here.
+RUN mkdir -p /models/onnx /photos /data
+
+ENV FACE_BACKEND=jetson \
+    MODELS_PATH=/models \
+    PHOTOS_FOLDER=/photos \
+    EMBEDDINGS_JSON=/data/embeddings.json \
+    PYTHONPATH=/app/src \
+    HOST=0.0.0.0 \
+    PORT=8080 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu
+
+EXPOSE 8080
+
+CMD ["python3", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--app-dir", "/app/src"]
