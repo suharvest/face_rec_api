@@ -7,7 +7,11 @@
 #    licence is non-commercial (MODEL_LICENSE.md). This image therefore carries
 #    code only; /models is a mount point and the container refuses to do useful
 #    work until something is mounted there. Engines are JetPack + SM specific
-#    anyway and are meant to be built on the target with tools/build_engine.sh.
+#    anyway and are meant to be built on the target. The entrypoint does that
+#    on first start (scripts/build_engine.py) from whatever ONNX is mounted at
+#    /models/onnx, so the container bootstraps itself once the weights are on
+#    the host; tools/build_engine.sh remains the trtexec equivalent for a host
+#    checkout.
 #
 # 2. Port 8080, not 8001. The solution's edge compose
 #    (sensecraft-solutions solutions/unmanned_store_access/assets/edge/docker-compose.yml)
@@ -57,7 +61,10 @@ RUN pip3 install --no-cache-dir --upgrade pip \
         "cuda-python>=12.0,<13.0"
 
 COPY src ./src
+COPY scripts/build_engine.py ./scripts/build_engine.py
+COPY docker/usa-entrypoint.sh /usr/local/bin/usa-entrypoint.sh
 COPY start_standalone.sh ./
+RUN chmod +x /usr/local/bin/usa-entrypoint.sh
 
 # /models, /photos and /data are mount points. MODELS_PATH holds the .engine
 # files (and models/onnx for the startup rebuild path); nothing is shipped here.
@@ -75,5 +82,10 @@ ENV FACE_BACKEND=jetson \
     LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu
 
 EXPOSE 8080
+
+# The entrypoint builds the TensorRT engines from /models/onnx before handing
+# over to uvicorn — engines are JetPack + SM specific and cannot be baked in.
+# ENGINE_BOOTSTRAP=off bypasses it (see docker/usa-entrypoint.sh).
+ENTRYPOINT ["/usr/local/bin/usa-entrypoint.sh"]
 
 CMD ["python3", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--app-dir", "/app/src"]
